@@ -1,4 +1,4 @@
-ReactoKinesiX
-=============
+Reacto-KinesiX
+=======================
 
-A RX based .Net client library for working with Amazon Kinesis
+A Rx-based client library for Amazon Kinesis.
