@@ -54,6 +54,7 @@
   <Import Project="$(SolutionDir)\.nuget\nuget.targets" />
   <ItemGroup>
     <Compile Include="Model.fs" />
+    <Compile Include="Utils.fs" />
     <Compile Include="Client.fs" />
     <None Include="Test.fsx" />
     <None Include="packages.config" />
