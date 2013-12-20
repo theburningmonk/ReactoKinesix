@@ -65,22 +65,35 @@ module internal KinesisUtils =
                          (ShardId shardId) 
                          iteratorType = 
         async {
-            let req = GetShardIteratorRequest(StreamName = streamName, 
-                                              ShardId = shardId,
-                                              ShardIteratorType = iteratorType)
+            let req = GetShardIteratorRequest(StreamName = streamName, ShardId = shardId)
+
+            match iteratorType with
+            | TrimHorizon -> 
+                req.ShardIteratorType       <- ShardIteratorType.TRIM_HORIZON
+            | AtSequenceNumber (SequenceNumber seqNum) -> 
+                req.StartingSequenceNumber  <- seqNum
+                req.ShardIteratorType       <- ShardIteratorType.AT_SEQUENCE_NUMBER
+            | AfterSequenceNumber (SequenceNumber seqNum) -> 
+                req.StartingSequenceNumber  <- seqNum
+                req.ShardIteratorType       <- ShardIteratorType.AFTER_SEQUENCE_NUMBER
+            | Latest ->
+                req.ShardIteratorType       <- ShardIteratorType.LATEST                
+
             let! res = kinesis.GetShardIteratorAsync(req)
             return res.ShardIterator
         }
 
     /// Returns a number of records from the shard in the stream along with the next shard iterator
-    let getRecords (kinesis : IAmazonKinesis) streamName shardId iteratorType (Iterator iterator) =        
+    let getRecords (kinesis : IAmazonKinesis) streamName shardId iterator =        
         async {
-            let! iterator = 
-                match iterator with
-                | Some x -> async { return x } 
-                | _ -> getShardIterator kinesis streamName shardId iteratorType
+            let req = GetRecordsRequest()
 
-            let req = GetRecordsRequest(ShardIterator = iterator)
+            match iterator with
+            | IteratorToken(token) -> req.ShardIterator <- token
+            | NoIteratorToken(iteratorType)   ->
+                let! token = getShardIterator kinesis streamName shardId iteratorType
+                req.ShardIterator <- token
+
             let res = kinesis.GetRecords(req)
             return res.NextShardIterator, res.Records :> Record seq
         }
@@ -99,7 +112,16 @@ module internal DynamoDBUtils =
     let private tryGetAttributeValue (dict : IDictionary<_, AttributeValue>) key = 
         match dict.TryGetValue key with
         | true, x -> Some x.S
-        | _ -> None    
+        | _ -> None
+
+    let (|NoShard|Shard|) (res : GetItemResponse) =
+        match tryGetAttributeValue res.Item shardIdAttr with
+        | None -> NoShard
+        | _ -> let workerId, heartbeat, checkpoint = 
+                    tryGetAttributeValue res.Item workerIdAttr,
+                    tryGetAttributeValue res.Item lastHeartbeatAttr,
+                    tryGetAttributeValue res.Item checkpointAttr
+               Shard(workerId, heartbeat, checkpoint)
 
     /// Returns the list of tables that currently exist in DynamoDB
     let getTables (dynamoDB : IAmazonDynamoDB) =
@@ -154,19 +176,27 @@ module internal DynamoDBUtils =
             // TODO : handle exceptoins
             let! res = dynamoDB.GetItemAsync(req)
 
-            match tryGetAttributeValue res.Item shardIdAttr with
-            | None -> return ShardStatus.Removed
-            | _    ->
-                match tryGetAttributeValue res.Item checkpointAttr, 
-                      tryGetAttributeValue res.Item lastHeartbeatAttr with
-                | Some checkpoint, Some heartbeat
-                    -> let heartbeat = fromHeartbeatTimestamp heartbeat
+            match res with
+            | NoShard -> return ShardStatus.Removed
+            | Shard(workerId, heartbeat, checkpoint) ->
+                match heartbeat, workerId, checkpoint with
+                | None, _, _ -> ShardStatus.New
+
+                //tryGetAttributeValue res.Item checkpointAttr, 
+                      
+                match tryGetAttributeValue res.Item lastHeartbeatAttr with
+                // if a queue never registered a heartbeat then it's definitely new
+                | None -> return ShardStatus.New
+                | Some heartbeat
+                    ->                     
+                    
+                       let workerId  = defaultArg (tryGetAttributeValue res.Item workerIdAttr) "" |> WorkerId
+                       let heartbeat = fromHeartbeatTimestamp heartbeat
+                       let seqNum    = SequenceNumber checkpoint
                    
-                       if DateTime.UtcNow - heartbeat < config.HeartbeatTimeout then
-                           let workerId = defaultArg (tryGetAttributeValue res.Item workerIdAttr) ""
-                           return ShardStatus.Processing(WorkerId workerId, heartbeat, SequenceNumber checkpoint)
-                       else return ShardStatus.NotProcessing
-                | _ -> return ShardStatus.NotProcessing
+                       if DateTime.UtcNow - heartbeat < config.HeartbeatTimeout 
+                       then return ShardStatus.Processing(workerId, seqNum)
+                       else return ShardStatus.NotProcessing(workerId, heartbeat, seqNum)                
         }
 
     /// Updates a shard conditionally against the worker ID so that if for some reason another worker has
@@ -181,7 +211,7 @@ module internal DynamoDBUtils =
         
         let expectedAttrVal = new ExpectedAttributeValue(Value = new AttributeValue(S = workerId), Exists = true)
         req.Expected.Add(workerIdAttr, expectedAttrVal)
-
+        
         update req
 
         // TODO : handle exceptions - conditional check = stop, other = retry?
@@ -190,14 +220,18 @@ module internal DynamoDBUtils =
     /// Updates the heartbeat value for the specified shard conditionally against the worker ID so that
     /// if for some reason another worker has taken over this shard then we shall stop processing this shard
     let updateHeartbeat : IAmazonDynamoDB -> TableName -> WorkerId -> ShardId -> unit = 
-        let update (req : UpdateItemRequest) = 
-            req.Key.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
+        let update (req : UpdateItemRequest) = req.Key.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
 
         updateShard update
 
     /// Updates the sequence number checkpoint for the specified shard conditionally against the worker
-    /// ID so that if for some reason another worker has taken over this shard then we shall stop 
+    /// ID so that if for some reason another worker has taken over this shard then we shall stop
     /// processing this shard
     let updateCheckpoint (SequenceNumber seqNumber) =
-        let update (req : UpdateItemRequest) = req.Key.Add(checkpointAttr, new AttributeValue(S = seqNumber))
+        let update (req : UpdateItemRequest) = 
+            // whilst we're updating the checkpoint, might as well also update the heartbeat since it's
+            // essentially a free update (i.e. one request)
+            req.Key.Add(checkpointAttr,    new AttributeValue(S = seqNumber))
+            req.Key.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
+                        
         updateShard update

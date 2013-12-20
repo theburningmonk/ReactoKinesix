@@ -26,13 +26,30 @@ exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
 
 [<AutoOpen>]
 module internal InternalModel =
-    type StreamName     = StreamName of string
-    type TableName      = TableName  of string
-    type ShardId        = ShardId    of string
-    type WorkerId       = WorkerId   of string
-    type Iterator       = Iterator   of string option
+    type StreamName     = StreamName     of string
+    type TableName      = TableName      of string
+    type ShardId        = ShardId        of string
+    type WorkerId       = WorkerId       of string
     type SequenceNumber = SequenceNumber of string
+
+    type IteratorType   = 
+        | TrimHorizon                               // starting at the trim horizon (i.e. earliest record available)
+        | AtSequenceNumber      of SequenceNumber   // starting at the given sequence number
+        | AfterSequenceNumber   of SequenceNumber   // starting immediate after the given sequence number        
+        | Latest                                    // starting at the latest record
+
+    type Iterator       = 
+        | IteratorToken         of string           // using the next iterator token from the previous call
+        | NoIteratorToken       of IteratorType     // fetch a new iterator token
+    
     type ShardStatus    = 
         | Removed       // the shard has been removed
-        | NotProcessing // the shard is there but not being processed
-        | Processing    of WorkerId * DateTime * SequenceNumber
+        | New           // the shard is new and has not been processed
+        // the shard is there but not currently being processed
+        | NotProcessing of WorkerId * DateTime * SequenceNumber
+        // the shard is currently being processed by a worker
+        | Processing    of WorkerId * SequenceNumber                
+
+    type ProcessResult  = 
+        | Success   of SequenceNumber
+        | Failure   of SequenceNumber * Exception

@@ -24,7 +24,7 @@ type private ReactoKinesixProcessor (kinesis    : IAmazonKinesis,
     let batchReceivedEvent          = new Event<Iterator * Record seq>()
     let recordProcessedEvent        = new Event<Record>()
     let processErroredEvent         = new Event<Record * Exception>()
-    let batchProcessedEvent         = new Event<Iterator * SequenceNumber>()
+    let batchProcessedEvent         = new Event<int * Iterator>()
 
     let heartbeatEvent              = new Event<unit>()
     let conditionalCheckFailedEvent = new Event<unit>()
@@ -45,18 +45,21 @@ type private ReactoKinesixProcessor (kinesis    : IAmazonKinesis,
         (fun () -> DynamoDBUtils.updateCheckpoint seqNum dynamoDB tableName workerId shardId)
         |> catchCondCheck
 
-    let fetchNextRecords seqNum iteratorType iterator = 
+    let fetchNextRecords iterator = 
         async {
-            let! nextIterator, batch = KinesisUtils.getRecords kinesis streamName shardId iteratorType iterator
-            batchReceivedEvent.Trigger(Iterator(Some nextIterator), batch)
+            let! nextIterator, batch = KinesisUtils.getRecords kinesis streamName shardId iterator
+            batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
         }
 
-    let processRecord (record : Record) =
+    let processRecord record = 
         try 
             action(record)
             recordProcessedEvent.Trigger(record)
+            Success(SequenceNumber record.SequenceNumber)
         with
-        | ex -> processErroredEvent.Trigger(record, ex)
+        | ex -> 
+            processErroredEvent.Trigger(record, ex)
+            Failure(SequenceNumber record.SequenceNumber, ex)
 
     let stopProcessing  = conditionalCheckFailedEvent.Publish
     let heartbeatSub    = Observable.Interval(config.Heartbeat).TakeUntil(stopProcessing).Subscribe(updateHeartbeat)
@@ -64,20 +67,40 @@ type private ReactoKinesixProcessor (kinesis    : IAmazonKinesis,
     // until we need to stop processing, keep fetching new records when we've finished processing the previous batch
     let fetchSub        = batchProcessedEvent.Publish
                             .TakeUntil(stopProcessing)
-                            .Subscribe(fun (iterator, seqNum) -> Async.StartImmediate <| fetchNextRecords seqNum ShardIteratorType.AFTER_SEQUENCE_NUMBER iterator)
+                            .Subscribe(fun (_, iterator) -> fetchNextRecords iterator |> Async.StartImmediate)
 
-    let records         = batchReceivedEvent.Publish.SelectMany(fun (_, records) -> records)
-    let recordsSub      = records.Subscribe(processRecord)
+    let receivedSub     = 
+        batchReceivedEvent.Publish
+            .TakeUntil(stopProcessing)
+            .Subscribe(fun (iterator, records) ->
+                match Seq.isEmpty records with
+                | true -> batchProcessedEvent.Trigger(0, iterator)
+                | _ -> 
+                    let count, lastResult = 
+                        records 
+                        |> Seq.scan (fun (count, _) record -> 
+                            let res = processRecord record
+                            (count + 1, Some res)) (0, None)
+                        |> Seq.takeWhile (fun (_, res) -> match res with | Some (Failure _) -> false | _ -> true)
+                        |> Seq.reduce (fun _ lastRes -> lastRes)
+
+                    match lastResult with
+                    | Some (Success _)           -> batchProcessedEvent.Trigger(count, iterator)
+                    | Some (Failure (seqNum, _)) -> batchProcessedEvent.Trigger(count, NoIteratorToken <| AtSequenceNumber seqNum))
 
     let initSub = Observable
                     .FromAsync(DynamoDBUtils.getShardStatus dynamoDB config tableName shardId)
-                    .Subscribe(function | NotProcessing 
-                                            -> fetchNextRecords (SequenceNumber "") ShardIteratorType.TRIM_HORIZON (Iterator None)
-                                               |> Async.StartImmediate
-                                        | Processing(workerId', _, seqNum) when workerId' = workerId 
-                                            -> fetchNextRecords seqNum ShardIteratorType.AFTER_SEQUENCE_NUMBER (Iterator None)
-                                               |> Async.StartImmediate
-                                        | _ -> ())
+                    .Subscribe(function 
+                        | New 
+                            -> // the shard has not been processed before, so start from the oldest record
+                               fetchNextRecords (NoIteratorToken <| TrimHorizon) |> Async.StartImmediate
+                        | NotProcessing(_, _, seqNum)
+                            -> // the shard has not been processed currently, start from the last checkpoint
+                               fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                        | Processing(workerId', seqNum) when workerId' = workerId 
+                            -> // the shard was being processed by this worker, continue from where we left off
+                               fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                        | _ -> ())
 
     [<CLIEvent>] member this.OnBatchReceived            = batchReceivedEvent.Publish
     [<CLIEvent>] member this.OnRecordProcessed          = recordProcessedEvent.Publish
@@ -90,7 +113,7 @@ type private ReactoKinesixProcessor (kinesis    : IAmazonKinesis,
         member this.Dispose () =
             heartbeatSub.Dispose()
             fetchSub.Dispose()
-            recordsSub.Dispose()
+            receivedSub.Dispose()
             initSub.Dispose()
 
 type private ReactoKinesix (streamName, workerId, shardId, config) =
