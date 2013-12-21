@@ -24,12 +24,13 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
                             workerId   : WorkerId,
                             shardId    : ShardId,
                             action     : Record -> unit) as this =
-    let loggerName   = sprintf "ReactorKinesisWorker[Stream:%O, Worker:%O, Shard:%O]" streamName workerId shardId
-    let logger       = LogManager.GetLogger(loggerName)
-    let log          = log logger
-    let logException = logException logger
+    let loggerName  = sprintf "ReactorKinesisWorker[Stream:%O, Worker:%O, Shard:%O]" streamName workerId shardId
+    let logger      = LogManager.GetLogger(loggerName)
+    let logDebug    = logDebug logger
+    let logWarn     = logWarn  logger
+    let logError    = logError logger
 
-    do log "Starting worker..." [||]
+    do logDebug "Starting worker..." [||]
 
     let batchReceivedEvent          = new Event<Iterator * Record seq>()
     let recordProcessedEvent        = new Event<Record>()
@@ -65,7 +66,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
                                       // blocked on the checkpoint update too and either succeed eventualy or some other
                                       // worker will take over if they were able to successful write to DynamoDB instead
                                       // of the current worker
-                                      log "Failed to update heartbeat, ignoring..." [||]
+                                      logWarn "Failed to update heartbeat, ignoring..." [||]
                                       ()
         }
         Async.Start(work, cts.Token)
@@ -88,7 +89,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
                                       // for now, try option c) with a 1 second delay as the risk of processing the same
                                       // records can ony be determined by the consumer, perhaps expose some configurable
                                       // behaviour under these circumstances?
-                                      logException exn "Failed to update checkpoint to [{0}]...retrying" [| seqNum |]
+                                      logError exn "Failed to update checkpoint to [{0}]...retrying" [| seqNum |]
                                       do! Async.Sleep(1000)
                                       updateCheckpoint seqNum
         }
@@ -96,7 +97,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
 
     let fetchNextRecords iterator = 
         async {
-            log "Fetching next records with iterator [{0}]" [| iterator |]
+            logDebug "Fetching next records with iterator [{0}]" [| iterator |]
 
             let! nextIterator, batch = KinesisUtils.getRecords kinesis streamName shardId iterator
             batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
@@ -113,13 +114,13 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
             Failure(SequenceNumber record.SequenceNumber, ex)
 
     let stopProcessing       = conditionalCheckFailedEvent.Publish
-    let stopProcessingLogSub = stopProcessing.Subscribe(fun _ -> log "Stop processing..." [||])
+    let stopProcessingLogSub = stopProcessing.Subscribe(fun _ -> logDebug "Stop processing..." [||])
                          
     let heartbeat        = Observable.Interval(config.Heartbeat).TakeUntil(stopProcessing)
-    let heartbeatLogSub  = heartbeat.Subscribe(fun _ -> log "Sending heartbeat..." [||])
+    let heartbeatLogSub  = heartbeat.Subscribe(fun _ -> logDebug "Sending heartbeat..." [||])
     let heartbeatSub     = heartbeat.Subscribe(updateHeartbeat)
 
-    let checkpointLogSub = checkpointEvent.Publish.Subscribe(fun seqNum -> log "Updating sequence number checkpoint [{0}]" [| seqNum |])
+    let checkpointLogSub = checkpointEvent.Publish.Subscribe(fun seqNum -> logDebug "Updating sequence number checkpoint [{0}]" [| seqNum |])
     
     let nextBatch       = startedEvent.Publish                            
                             .Merge(Observable.Delay(emptyReceiveEvent.Publish, config.EmptyReceiveDelay))
@@ -131,12 +132,12 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
 
     let received        = batchReceivedEvent.Publish
     let receivedLogSub  = received.Subscribe(fun (iterator, records) -> 
-                            log "Received batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records|])
+                            logDebug "Received batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records|])
 
     let processing      = received
                             .Zip(nextBatch, fun receivedBatch _ -> receivedBatch)
                             .TakeUntil(stopProcessing)
-    let processingLogSub = processing.Subscribe(fun (iterator, records) -> log "Start processing batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records |])
+    let processingLogSub = processing.Subscribe(fun (iterator, records) -> logDebug "Start processing batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records |])
     let processingSub   = 
         processing.Subscribe(fun (iterator, records) ->
             match Seq.isEmpty records with
@@ -154,20 +155,20 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
 
                 match lastResult with
                 | Some (Success seqNum)      -> 
-                    log "Batch was fully processed [{0}], last sequence number [{1}]" [| count; seqNum |]
+                    logDebug "Batch was fully processed [{0}], last sequence number [{1}]" [| count; seqNum |]
 
                     updateCheckpoint(seqNum)
                     batchProcessedEvent.Trigger(count, iterator)
                 | Some (Failure (seqNum, _)) -> 
-                    log "Batch was partially processed [{0}/{1}], last successful sequence number [{2}]" 
-                        [| count; Seq.length records; seqNum |]
+                    logWarn "Batch was partially processed [{0}/{1}], last successful sequence number [{2}]" 
+                            [| count; Seq.length records; seqNum |]
 
                     updateCheckpoint(seqNum)
                     batchProcessedEvent.Trigger(count, NoIteratorToken <| AtSequenceNumber seqNum))
 
     let processedLogSub = recordProcessedEvent.Publish.Subscribe(fun (record : Record) ->
-                            log "Processed record [PartitionKey:{0}, SequenceNumber:{1}]"
-                                [| record.PartitionKey; record.SequenceNumber |])
+                            logDebug "Processed record [PartitionKey:{0}, SequenceNumber:{1}]"
+                                     [| record.PartitionKey; record.SequenceNumber |])
 
     let initSub = Observable
                     .FromAsync(DynamoDBUtils.getShardStatus dynamoDB config tableName shardId)
@@ -198,7 +199,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
     interface IDisposable with
         member this.Dispose () = 
             if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
-                log "Disposing..." [||]
+                logDebug "Disposing..." [||]
 
                 cts.Cancel()
 
@@ -207,7 +208,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
                    (cts :> IDisposable) |]
                 |> Array.iter (fun x -> x.Dispose())
 
-                log "Disposed." [||]
+                logDebug "Disposed." [||]
 
 type ReactoKinesixApp (awsKey     : string, 
                        awsSecret  : string, 
@@ -220,7 +221,7 @@ type ReactoKinesixApp (awsKey     : string,
 
     let loggerName = sprintf "ReactoKinesixApp[AppName:%s, Stream:%O]" appName streamName
     let logger     = LogManager.GetLogger(loggerName)
-    let log        = log logger
+    let logDebug   = logDebug logger
 
     let disposeInvoked = ref 0
 
@@ -239,7 +240,7 @@ type ReactoKinesixApp (awsKey     : string,
     let tableReady = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
 
     // app is initialized when the app's state table is fully created
-    let initializedLogSub = tableReady.Subscribe(fun _ -> log "State table [{0}] is ready" [| tableName |])
+    let initializedLogSub = tableReady.Subscribe(fun _ -> logDebug "State table [{0}] is ready" [| tableName |])
     let initializedSub    = tableReady.Subscribe(fun _ -> stateTableReadyEvent.Trigger(tableName.ToString()))
 
     let start workerId action =
@@ -269,9 +270,9 @@ type ReactoKinesixApp (awsKey     : string,
     interface IDisposable with
         member this.Dispose () = 
             if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
-                log "Disposing..." [||]
+                logDebug "Disposing..." [||]
 
                 initializedLogSub.Dispose()
                 initializedSub.Dispose()
 
-                log "Disposed" [||]
+                logDebug "Disposed" [||]
