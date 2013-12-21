@@ -173,19 +173,24 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
     let initSub = Observable
                     .FromAsync(DynamoDBUtils.getShardStatus dynamoDB config tableName shardId)
                     .Subscribe(function 
-                        | New(workerId', _) when workerId' = workerId
-                            -> // the shard has not been processed before, so start from the oldest record
-                               fetchNextRecords (NoIteratorToken <| TrimHorizon) |> Async.StartImmediate
-                               startedEvent.Trigger()
-                        | NotProcessing(_, _, seqNum)
-                            -> // the shard has not been processed currently, start from the last checkpoint
-                               fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
-                               startedEvent.Trigger()
-                        | Processing(workerId', seqNum) when workerId' = workerId 
-                            -> // the shard was being processed by this worker, continue from where we left off
-                               fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
-                               startedEvent.Trigger()
-                        | _ -> ())
+                        | Failure exn -> 
+                            logError exn "" [||]
+                            dispose()
+                        | Success res -> 
+                            match res with
+                            | New(workerId', _) when workerId' = workerId -> 
+                                // the shard has not been processed before, so start from the oldest record
+                                fetchNextRecords (NoIteratorToken <| TrimHorizon) |> Async.StartImmediate
+                                startedEvent.Trigger()
+                            | NotProcessing(_, _, seqNum) -> 
+                                // the shard has not been processed currently, start from the last checkpoint
+                                fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                                startedEvent.Trigger()
+                            | Processing(workerId', seqNum) when workerId' = workerId -> 
+                                // the shard was being processed by this worker, continue from where we left off
+                                fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                                startedEvent.Trigger()
+                            | _ -> ())
 
     [<CLIEvent>] member this.OnBatchReceived            = batchReceivedEvent.Publish
     [<CLIEvent>] member this.OnRecordProcessed          = recordProcessedEvent.Publish
@@ -222,6 +227,7 @@ type ReactoKinesixApp (awsKey     : string,
     let loggerName = sprintf "ReactoKinesixApp[AppName:%s, Stream:%O]" appName streamName
     let logger     = LogManager.GetLogger(loggerName)
     let logDebug   = logDebug logger
+    let logWarn    = logWarn  logger
 
     let disposeInvoked = ref 0
 
@@ -252,12 +258,16 @@ type ReactoKinesixApp (awsKey     : string,
                 shards
                 |> Seq.map (fun shard -> 
                     async { 
-                        let! isCreated = DynamoDBUtils.createShard dynamoDB tableName workerId (ShardId shard.ShardId)
-                        return shard, isCreated
+                        let! res = DynamoDBUtils.createShard dynamoDB tableName workerId (ShardId shard.ShardId)
+                        match res with 
+                        | Success _   -> ()
+                        | Failure exn -> logWarn "Failed to create entry for shard [{0}] in the state table.. continuing anyway.." [| shard.ShardId |]
+
+                        return shard
                     })
                 |> Async.Parallel
 
-            let workers = createdShards |> Array.map (fun (shard, _) -> new ReactoKinesix(kinesis, dynamoDB, config, tableName, streamName, workerId, ShardId shard.ShardId, action))
+            let workers = createdShards |> Array.map (fun shard -> new ReactoKinesix(kinesis, dynamoDB, config, tableName, streamName, workerId, ShardId shard.ShardId, action))
 
             return { new IDisposable with member this.Dispose () = workers |> Array.iter (fun p -> (p :> IDisposable).Dispose()) }
         }

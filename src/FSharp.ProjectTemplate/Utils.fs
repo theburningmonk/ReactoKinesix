@@ -28,7 +28,15 @@ module internal Utils =
             let msg = String.Format(format, args)
             logger.Error(msg, exn)
 
-    /// Extension methods to the Rx Observable type
+    /// Default function for calcuating delay (in milliseconds) between retries, based on (http://en.wikipedia.org/wiki/Exponential_backoff)
+    /// TODO : can be memoized
+    let private exponentialDelay attempts =
+        let rec sum acc = function | 0 -> acc | n -> sum (acc + n) (n - 1)
+
+        let n = pown 2 attempts - 1
+        let slots = float (sum 0 n) / float (n + 1)
+        int (500.0 * slots)
+
     type Observable with
         /// Returns an IObservable<T> from an Async<T> (from http://cs.hubfs.net/topic/None/59632#comment-72865)
         static member FromAsync (computation) =
@@ -57,6 +65,24 @@ module internal Utils =
                 Async.StartImmediate(wrapper, cts.Token)
 
                 { new System.IDisposable with member this.Dispose() = cancelOrDispose(true) }))
+
+    type Async with
+        /// Retries the async computation up to specified number of times. Optionally accepts a function to calculate
+        /// the delay in milliseconds between retries, default is exponential delay with a backoff slot of 500ms.
+        static member WithRetry (computation : Async<'a>, maxRetries, ?calcDelay) =
+            let calcDelay = defaultArg calcDelay exponentialDelay
+
+            let rec loop retryCount =
+                async {
+                    let! res = computation |> Async.Catch
+                    match res with
+                    | Choice1Of2 x -> return Success x
+                    | Choice2Of2 _ when retryCount <= maxRetries -> 
+                        do! calcDelay (retryCount + 1) |> Async.Sleep
+                        return! loop (retryCount + 1)
+                    | Choice2Of2 exn -> return Failure exn
+                }
+            loop 0
 
 module internal KinesisUtils =
     type IAmazonKinesis with
@@ -245,15 +271,15 @@ module internal DynamoDBUtils =
                 do! dynamoDB.PutItemAsync(req) |> Async.Ignore
 
                 logDebug "Created shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
-                return true
+                return Success ()
             with
             | :? ConditionalCheckFailedException ->
                 logDebug "(Conditional Check) Failed to create shard [{2}] data in state table [{0}] for worker [{1}]. Shard already exists in table."
                          [| tableName; workerId; shardId |]
-                return false
+                return Success ()
             | exn ->
                 logError exn "Failed to create shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
-                return false
+                return Failure exn
         }
 
     /// Returns the current status of the shard
@@ -268,24 +294,26 @@ module internal DynamoDBUtils =
 
             logDebug "Getting current status of shard [{1}] from state table [{0}]" [| tableName; shardId |]
 
-            // TODO : handle exceptions
-            let! res = dynamoDB.GetItemAsync(req)
+            let! res = Async.WithRetry(dynamoDB.GetItemAsync(req), config.MaxDynamoDBRetries)
 
             match res with
-            | NoShard -> 
-                logDebug "Shard [{1}] not found in state tabe [{0}]" [| tableName; shardId |]
-                return ShardStatus.Removed
-            | Shard(workerId, heartbeat, checkpoint) ->
-                let now = DateTime.UtcNow
+            | Failure exn -> return Failure exn
+            | Success res -> 
+                match res with
+                | NoShard -> 
+                    logDebug "Shard [{1}] not found in state tabe [{0}]" [| tableName; shardId |]
+                    return Success ShardStatus.Removed
+                | Shard(workerId, heartbeat, checkpoint) ->
+                    let now = DateTime.UtcNow
 
-                logDebug "Shard [{1}] found in state table [{0}], worker [{2}], last heartbeat [{3}], sequence number checkpoint [{4}]"
-                         [| tableName; shardId; workerId; heartbeat; checkpoint |]
+                    logDebug "Shard [{1}] found in state table [{0}], worker [{2}], last heartbeat [{3}], sequence number checkpoint [{4}]"
+                             [| tableName; shardId; workerId; heartbeat; checkpoint |]
 
-                match checkpoint with
-                | None -> return ShardStatus.New(workerId, heartbeat)
-                | Some seqNum when now - heartbeat < config.HeartbeatTimeout 
-                    -> return ShardStatus.Processing(workerId, SequenceNumber seqNum)
-                | Some seqNum -> return ShardStatus.NotProcessing(workerId, heartbeat, SequenceNumber seqNum)
+                    match checkpoint with
+                    | None -> return Success <| ShardStatus.New(workerId, heartbeat)
+                    | Some seqNum when now - heartbeat < config.HeartbeatTimeout 
+                        -> return Success <| ShardStatus.Processing(workerId, SequenceNumber seqNum)
+                    | Some seqNum -> return Success <| ShardStatus.NotProcessing(workerId, heartbeat, SequenceNumber seqNum)
         }
 
     /// Updates a shard conditionally against the worker ID so that if for some reason another worker has

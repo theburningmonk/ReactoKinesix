@@ -24,6 +24,9 @@ type ReactoKinesixConfig () =
     /// Delay in trying to pull the stream if the last pull returned no records. Default is 3 second.
     member val EmptyReceiveDelay       = TimeSpan.FromSeconds(3.0) with get, set
 
+    /// Maximum number of retries on DynamoDB operations. Default is 3.
+    member val MaxDynamoDBRetries      = 3 with get, set
+
 /// Thrown when the configuration specifies a heartbeat frequence that's greater than the heartbeat timeout
 exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
 
@@ -73,6 +76,6 @@ module internal InternalModel =
 
     type Result<'Success, 'Failure> =
         | Success   of 'Success
-        | Failure   of 'Failure * Exception
+        | Failure   of 'Failure
 
-    type ProcessResult  = Result<SequenceNumber, SequenceNumber>
+    type ProcessResult  = Result<SequenceNumber, SequenceNumber * Exception>
