@@ -120,7 +120,7 @@ module internal KinesisUtils =
                 let! token = getShardIterator kinesis streamName shardId iteratorType
                 req.ShardIterator <- token
 
-            let res = kinesis.GetRecords(req)
+            let! res = kinesis.GetRecordsAsync(req)
 
             log "Received [{0}] records from stream [{1}], shard [{2}]"
                 [| res.Records.Count; streamName; shardId |]

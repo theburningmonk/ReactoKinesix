@@ -36,6 +36,8 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
     let processErroredEvent         = new Event<Record * Exception>()
     let batchProcessedEvent         = new Event<int * Iterator>()
 
+    let startedEvent                = new Event<unit>()
+    let emptyReceiveEvent           = new Event<unit>()
     let checkpointEvent             = new Event<SequenceNumber>()
     let heartbeatEvent              = new Event<unit>()
     let conditionalCheckFailedEvent = new Event<unit>()
@@ -110,7 +112,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
             processErroredEvent.Trigger(record, ex)
             Failure(SequenceNumber record.SequenceNumber, ex)
 
-    let stopProcessing   = conditionalCheckFailedEvent.Publish
+    let stopProcessing       = conditionalCheckFailedEvent.Publish
     let stopProcessingLogSub = stopProcessing.Subscribe(fun _ -> log "Stop processing..." [||])
                          
     let heartbeat        = Observable.Interval(config.Heartbeat).TakeUntil(stopProcessing)
@@ -119,7 +121,10 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
 
     let checkpointLogSub = checkpointEvent.Publish.Subscribe(fun seqNum -> log "Updating sequence number checkpoint [{0}]" [| seqNum |])
     
-    // until we need to stop processing, keep fetching new records when we've finished processing the previous batch
+    let nextBatch       = startedEvent.Publish                            
+                            .Merge(Observable.Delay(emptyReceiveEvent.Publish, TimeSpan.FromSeconds(3.0)))
+                            .Merge(checkpointEvent.Publish.Select(fun _ -> ()))
+
     let fetch           = batchProcessedEvent.Publish
                             .TakeUntil(stopProcessing)
     let fetchSub        = fetch.Subscribe(fun (_, iterator) -> fetchNextRecords iterator |> Async.StartImmediate)
@@ -128,15 +133,16 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
     let receivedLogSub  = received.Subscribe(fun (iterator, records) -> 
                             log "Received batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records|])
 
-    // only process the newly received batch if the checkpoint for the previous batch was done
     let processing      = received
-                            .Zip(checkpointEvent.Publish, fun receivedBatch _ -> receivedBatch)
+                            .Zip(nextBatch, fun receivedBatch _ -> receivedBatch)
                             .TakeUntil(stopProcessing)
-    let processingLogSub = processing.Subscribe(fun (iterator, records) -> log "" [| iterator; Seq.length records |])
+    let processingLogSub = processing.Subscribe(fun (iterator, records) -> log "Start processing batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records |])
     let processingSub   = 
         processing.Subscribe(fun (iterator, records) ->
             match Seq.isEmpty records with
-            | true -> batchProcessedEvent.Trigger(0, iterator)
+            | true -> 
+                emptyReceiveEvent.Trigger()
+                batchProcessedEvent.Trigger(0, iterator)
             | _ -> 
                 let count, lastResult = 
                     records 
@@ -169,18 +175,22 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
                         | New(workerId', _) when workerId' = workerId
                             -> // the shard has not been processed before, so start from the oldest record
                                fetchNextRecords (NoIteratorToken <| TrimHorizon) |> Async.StartImmediate
+                               startedEvent.Trigger()
                         | NotProcessing(_, _, seqNum)
                             -> // the shard has not been processed currently, start from the last checkpoint
                                fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                               startedEvent.Trigger()
                         | Processing(workerId', seqNum) when workerId' = workerId 
                             -> // the shard was being processed by this worker, continue from where we left off
                                fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                               startedEvent.Trigger()
                         | _ -> ())
 
     [<CLIEvent>] member this.OnBatchReceived            = batchReceivedEvent.Publish
     [<CLIEvent>] member this.OnRecordProcessed          = recordProcessedEvent.Publish
     [<CLIEvent>] member this.OnProcessErrored           = processErroredEvent.Publish
     [<CLIEvent>] member this.OnBatchProcessed           = batchProcessedEvent.Publish
+    [<CLIEvent>] member this.OnEmptyReceive             = emptyReceiveEvent.Publish
     [<CLIEvent>] member this.OnCheckpoint               = checkpointEvent.Publish
     [<CLIEvent>] member this.OnHeartbeat                = heartbeatEvent.Publish
     [<CLIEvent>] member this.OnConditionalCheckFailed   = conditionalCheckFailedEvent.Publish
@@ -193,7 +203,8 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
                 cts.Cancel()
 
                 [| stopProcessingLogSub; heartbeatLogSub; heartbeatSub; checkpointLogSub; fetchSub;
-                   receivedLogSub; processingSub; processedLogSub; initSub; (cts :> IDisposable) |]
+                   receivedLogSub; processingLogSub; processingSub; processedLogSub; initSub; 
+                   (cts :> IDisposable) |]
                 |> Array.iter (fun x -> x.Dispose())
 
                 log "Disposed." [||]
