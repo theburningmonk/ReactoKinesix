@@ -296,7 +296,7 @@ module internal DynamoDBUtils =
         
             update req
 
-            // TODO : handle exceptions - conditional check = stop, other = retry?
+            // exception handling for this is done in the client code based on the operation (heartbeat or checkpoint)
             do! dynamoDB.UpdateItemAsync(req) |> Async.Ignore
 
             log "Updated shard [{0}] for worker [{1}] in state table [{0}]" [| tableName; workerId; shardId |]
