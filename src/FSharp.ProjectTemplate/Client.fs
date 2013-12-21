@@ -215,19 +215,16 @@ type ReactoKinesixApp (awsKey     : string,
     
     let streamName = StreamName streamName
 
-    let tableCreated = Observable.FromAsync(DynamoDBUtils.initStateTable dynamoDB config appName)
-    let tableReady   = tableCreated.SelectMany(fun tableName -> Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName))
+    let tableName  = DynamoDBUtils.initStateTable dynamoDB config appName |> Async.RunSynchronously
+
+    let tableReady = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
 
     // app is initialized when the app's state table is fully created
-    let initialized  = tableCreated.Zip(tableReady, fun tableName _ -> tableName)
-    let initializedLogSub = initialized.Subscribe(fun tableName -> log "State table [{0}] is ready" [| tableName |])
-    let initializedSub    = initialized.Subscribe(fun (TableName tableName) -> stateTableReadyEvent.Trigger(tableName))
+    let initializedLogSub = tableReady.Subscribe(fun _ -> log "State table [{0}] is ready" [| tableName |])
+    let initializedSub    = tableReady.Subscribe(fun _ -> stateTableReadyEvent.Trigger(tableName.ToString()))
 
     let start workerId action =
         let workerId  = WorkerId workerId
-
-        // wait for the app to be initialized
-        let tableName = initialized.Wait()
 
         async {
             let! shards = KinesisUtils.getShards kinesis streamName
@@ -240,9 +237,7 @@ type ReactoKinesixApp (awsKey     : string,
                     })
                 |> Async.Parallel
 
-            let workers = createdShards 
-                            |> Array.filter snd 
-                            |> Array.map (fun (shard, _) -> new ReactoKinesix(kinesis, dynamoDB, config, tableName, streamName, workerId, ShardId shard.ShardId, action))
+            let workers = createdShards |> Array.map (fun (shard, _) -> new ReactoKinesix(kinesis, dynamoDB, config, tableName, streamName, workerId, ShardId shard.ShardId, action))
 
             return { new IDisposable with member this.Dispose () = workers |> Array.iter (fun p -> (p :> IDisposable).Dispose()) }
         }

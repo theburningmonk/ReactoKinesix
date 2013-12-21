@@ -187,14 +187,15 @@ module internal DynamoDBUtils =
             let! tableNames = getTables dynamoDB
 
             match tableNames |> Seq.exists ((=) appTableName) with
-            | false -> 
+            | true -> 
                 log "State table [{0}] already exists for app [{1}]" [| appTableName; appName |]
                 return TableName appTableName
             | _     -> 
                 let req = new CreateTableRequest(TableName = appTableName)
+                req.AttributeDefinitions.Add(new AttributeDefinition(AttributeName = shardIdAttr, AttributeType = ScalarAttributeType.S))
                 req.KeySchema.Add(new KeySchemaElement(AttributeName = shardIdAttr, KeyType = KeyType.HASH))
-                req.ProvisionedThroughput.ReadCapacityUnits  <- config.DynamoDBReadThroughput
-                req.ProvisionedThroughput.WriteCapacityUnits <- config.DynamoDBWriteThroughput
+                req.ProvisionedThroughput <- new ProvisionedThroughput(ReadCapacityUnits  = config.DynamoDBReadThroughput,
+                                                                       WriteCapacityUnits = config.DynamoDBWriteThroughput)
         
                 // TODO : handle exception when table already exists
                 let! res = dynamoDB.CreateTableAsync(req)
@@ -264,12 +265,12 @@ module internal DynamoDBUtils =
 
             match res with
             | NoShard -> 
-                log "Shard [{1}] not found in state tabe [{1}]" [| tableName; shardId |]
+                log "Shard [{1}] not found in state tabe [{0}]" [| tableName; shardId |]
                 return ShardStatus.Removed
             | Shard(workerId, heartbeat, checkpoint) ->
                 let now = DateTime.UtcNow
 
-                log "Shard [{1}] found in state table [{1}], worker [{2}], last heartbeat [{3}], sequence number checkpoint [{4}]"
+                log "Shard [{1}] found in state table [{0}], worker [{2}], last heartbeat [{3}], sequence number checkpoint [{4}]"
                     [| tableName; shardId; workerId; heartbeat; checkpoint |]
 
                 match checkpoint with
