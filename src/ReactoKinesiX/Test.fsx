@@ -22,8 +22,8 @@ open ReactoKinesix.Utils
 open log4net
 open log4net.Config
 
-let awsKey      = "AWS-KEY"
-let awsSecret   = "AWS-SECRET"
+let awsKey      = "AKIAJIQ27FQV7TT3NC6Q"
+let awsSecret   = "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"
 let region      = RegionEndpoint.USEast1
 let streamName  = "YC-test"
 
