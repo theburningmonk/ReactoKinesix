@@ -3,6 +3,7 @@
 open System
 open System.Reactive
 open System.Reactive.Linq
+open System.Threading
 
 open Amazon
 open Amazon.DynamoDBv2
@@ -20,30 +21,64 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
                             streamName,
                             workerId,
                             shardId,
-                            action     : Record -> unit) =
+                            action     : Record -> unit) as this =
     let batchReceivedEvent          = new Event<Iterator * Record seq>()
     let recordProcessedEvent        = new Event<Record>()
     let processErroredEvent         = new Event<Record * Exception>()
     let batchProcessedEvent         = new Event<int * Iterator>()
 
+    let checkpointEvent             = new Event<SequenceNumber>()
     let heartbeatEvent              = new Event<unit>()
     let conditionalCheckFailedEvent = new Event<unit>()
 
-    let catchCondCheck f = 
-        try
-            f()
-        with
-        | :? ConditionalCheckFailedException -> 
-            conditionalCheckFailedEvent.Trigger()
-            reraise()
+    let disposeInvoked = ref 0
+    let dispose () = (this :> IDisposable).Dispose()
+
+    let cts = new CancellationTokenSource();
 
     let updateHeartbeat _ = 
-        (fun () -> DynamoDBUtils.updateHeartbeat dynamoDB tableName workerId shardId |> Async.RunSynchronously)
-        |> catchCondCheck
+        let work = async {
+            let! res = DynamoDBUtils.updateHeartbeat dynamoDB tableName workerId shardId |> Async.Catch
+            match res with
+            | Choice1Of2 () -> heartbeatEvent.Trigger()
+            | Choice2Of2 ex -> match ex with 
+                               | :? ConditionalCheckFailedException -> 
+                                    conditionalCheckFailedEvent.Trigger()
+                                    dispose()
+                               | _ -> // TODO : what's the right thing to do here?
+                                      // a) give up, let the next cycle (or next checkpoint update) update the heartbeat
+                                      // b) retry a few times
+                                      // c) retry until we succeed
+                                      // for now, try option a) as it's not entirely critical for one heartbeat update to
+                                      // succeed, if problem is with DynamoDB and it persists then eventually we'll be
+                                      // blocked on the checkpoint update too and either succeed eventualy or some other
+                                      // worker will take over if they were able to successful write to DynamoDB instead
+                                      // of the current worker
+                                      ()
+        }
+        Async.Start(work, cts.Token)
 
-    let updateCheckpoint seqNum =
-        (fun () -> DynamoDBUtils.updateCheckpoint seqNum dynamoDB tableName workerId shardId |> Async.RunSynchronously)
-        |> catchCondCheck
+    let rec updateCheckpoint seqNum =
+        let work = async {
+            let! res = DynamoDBUtils.updateCheckpoint seqNum dynamoDB tableName workerId shardId |> Async.Catch
+            match res with
+            | Choice1Of2 () -> checkpointEvent.Trigger(seqNum)
+            | Choice2Of2 ex -> match ex with 
+                               | :? ConditionalCheckFailedException -> 
+                                    conditionalCheckFailedEvent.Trigger()
+                                    dispose()
+                               | _ -> // TODO : what's the right thing to do here if we failed to update checkpoint? 
+                                      // a) keep going and risk allowing more records to be processed multiple times
+                                      // b) crash and let the last batch of records be processed against
+                                      // c) wait and recurse until we succeed until some other worker takes over
+                                      //    processing of the shard in which case we get conditional check failed
+                                      // for now, try option c) with a 1 second delay as the risk of processing the same
+                                      // records can ony be determined by the consumer, perhaps expose some configurable
+                                      // behaviour under these circumstances?
+                                      do! Async.Sleep(1000)
+                                      updateCheckpoint seqNum
+        }
+        Async.Start(work, cts.Token)
 
     let fetchNextRecords iterator = 
         async {
@@ -66,6 +101,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
     
     // until we need to stop processing, keep fetching new records when we've finished processing the previous batch
     let fetchSub        = batchProcessedEvent.Publish
+                            .Zip(checkpointEvent.Publish, fun batchProcessedRes _ -> batchProcessedRes)
                             .TakeUntil(stopProcessing)
                             .Subscribe(fun (_, iterator) -> fetchNextRecords iterator |> Async.StartImmediate)
 
@@ -110,15 +146,18 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
     [<CLIEvent>] member this.OnRecordProcessed          = recordProcessedEvent.Publish
     [<CLIEvent>] member this.OnProcessErrored           = processErroredEvent.Publish
     [<CLIEvent>] member this.OnBatchProcessed           = batchProcessedEvent.Publish
+    [<CLIEvent>] member this.OnCheckpoint               = checkpointEvent.Publish
     [<CLIEvent>] member this.OnHeartbeat                = heartbeatEvent.Publish
     [<CLIEvent>] member this.OnConditionalCheckFailed   = conditionalCheckFailedEvent.Publish
 
     interface IDisposable with
-        member this.Dispose () =
-            heartbeatSub.Dispose()
-            fetchSub.Dispose()
-            receivedSub.Dispose()
-            initSub.Dispose()
+        member this.Dispose () = 
+            if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
+                cts.Cancel()
+                heartbeatSub.Dispose()
+                fetchSub.Dispose()
+                receivedSub.Dispose()
+                initSub.Dispose()
 
 type ReactoKinesixApp (awsKey     : string, 
                        awsSecret  : string, 
