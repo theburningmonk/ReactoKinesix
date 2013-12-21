@@ -121,15 +121,20 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
     
     // until we need to stop processing, keep fetching new records when we've finished processing the previous batch
     let fetch           = batchProcessedEvent.Publish
-                            .Zip(checkpointEvent.Publish, fun batchProcessedRes _ -> batchProcessedRes)
                             .TakeUntil(stopProcessing)
     let fetchSub        = fetch.Subscribe(fun (_, iterator) -> fetchNextRecords iterator |> Async.StartImmediate)
 
-    let received        = batchReceivedEvent.Publish.TakeUntil(stopProcessing)
+    let received        = batchReceivedEvent.Publish
     let receivedLogSub  = received.Subscribe(fun (iterator, records) -> 
                             log "Received batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records|])
-    let receivedSub     = 
-        received.Subscribe(fun (iterator, records) ->
+
+    // only process the newly received batch if the checkpoint for the previous batch was done
+    let processing      = received
+                            .Zip(checkpointEvent.Publish, fun receivedBatch _ -> receivedBatch)
+                            .TakeUntil(stopProcessing)
+    let processingLogSub = processing.Subscribe(fun (iterator, records) -> log "" [| iterator; Seq.length records |])
+    let processingSub   = 
+        processing.Subscribe(fun (iterator, records) ->
             match Seq.isEmpty records with
             | true -> batchProcessedEvent.Trigger(0, iterator)
             | _ -> 
@@ -188,7 +193,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
                 cts.Cancel()
 
                 [| stopProcessingLogSub; heartbeatLogSub; heartbeatSub; checkpointLogSub; fetchSub;
-                   receivedSub; receivedLogSub; processedLogSub; initSub; (cts :> IDisposable) |]
+                   receivedLogSub; processingSub; processedLogSub; initSub; (cts :> IDisposable) |]
                 |> Array.iter (fun x -> x.Dispose())
 
                 log "Disposed." [||]

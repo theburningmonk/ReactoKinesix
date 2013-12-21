@@ -154,16 +154,16 @@ module internal DynamoDBUtils =
         | _ -> None
 
     let private (|NoShard|Shard|) (res : GetItemResponse) =
-        match tryGetAttributeValue res.Item shardIdAttr with
-        | None -> NoShard
-        | _ -> // the shard creation should always ensure that worker ID and heartbeat is created
-               // but the checkpoint is only set the first time we were able to get records from
-               // the stream and processed them
-               let workerId, heartbeat, checkpoint = 
-                    res.Item.[workerIdAttr].S,
-                    res.Item.[lastHeartbeatAttr].S,
-                    tryGetAttributeValue res.Item checkpointAttr
-               Shard(WorkerId workerId, fromHeartbeatTimestamp heartbeat, checkpoint)
+        if res.Item.Count = 0 then NoShard
+        else 
+            // the shard creation should always ensure that worker ID and heartbeat is created
+            // but the checkpoint is only set the first time we were able to get records from
+            // the stream and processed them
+            let workerId, heartbeat, checkpoint = 
+                res.Item.[workerIdAttr].S,
+                res.Item.[lastHeartbeatAttr].S,
+                tryGetAttributeValue res.Item checkpointAttr
+            Shard(WorkerId workerId, fromHeartbeatTimestamp heartbeat, checkpoint)
 
     /// Returns the list of tables that currently exist in DynamoDB
     let getTables (dynamoDB : IAmazonDynamoDB) =
@@ -305,7 +305,9 @@ module internal DynamoDBUtils =
     /// Updates the heartbeat value for the specified shard conditionally against the worker ID so that
     /// if for some reason another worker has taken over this shard then we shall stop processing this shard
     let updateHeartbeat : IAmazonDynamoDB -> TableName -> WorkerId -> ShardId -> Async<unit> = 
-        let update (req : UpdateItemRequest) = req.Key.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
+        let update (req : UpdateItemRequest) = 
+            let newAttrValue = new AttributeValue(S = getHeartbeatTimestamp())
+            req.AttributeUpdates.Add(lastHeartbeatAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newAttrValue))
 
         updateShard update
 
@@ -316,7 +318,9 @@ module internal DynamoDBUtils =
         let update (req : UpdateItemRequest) = 
             // whilst we're updating the checkpoint, might as well also update the heartbeat since it's
             // essentially a free update (i.e. one request)
-            req.Key.Add(checkpointAttr,    new AttributeValue(S = seqNumber))
-            req.Key.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
+            let newCheckpointValue = new AttributeValue(S = seqNumber)
+            req.AttributeUpdates.Add(checkpointAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newCheckpointValue))
+            let newHeartbeatValue  = new AttributeValue(S = getHeartbeatTimestamp())
+            req.AttributeUpdates.Add(lastHeartbeatAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newHeartbeatValue))
                         
         updateShard update
