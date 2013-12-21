@@ -44,7 +44,8 @@ module internal InternalModel =
     
     type ShardStatus    = 
         | Removed       // the shard has been removed
-        | New           // the shard is new and has not been processed
+        // the shard is new and has not been processed
+        | New           of WorkerId * DateTime
         // the shard is there but not currently being processed
         | NotProcessing of WorkerId * DateTime * SequenceNumber
         // the shard is currently being processed by a worker

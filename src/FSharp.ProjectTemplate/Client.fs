@@ -13,14 +13,14 @@ open Amazon.Kinesis.Model
 open ReactoKinesix.Model
 open ReactoKinesix.Utils
 
-type private ReactoKinesixProcessor (kinesis    : IAmazonKinesis,
-                                     dynamoDB   : IAmazonDynamoDB,
-                                     config     : ReactoKinesixConfig,
-                                     tableName, 
-                                     streamName,
-                                     workerId,
-                                     shardId,
-                                     action     : Record -> unit) =
+type private ReactoKinesix (kinesis    : IAmazonKinesis,
+                            dynamoDB   : IAmazonDynamoDB,
+                            config     : ReactoKinesixConfig,
+                            tableName, 
+                            streamName,
+                            workerId,
+                            shardId,
+                            action     : Record -> unit) =
     let batchReceivedEvent          = new Event<Iterator * Record seq>()
     let recordProcessedEvent        = new Event<Record>()
     let processErroredEvent         = new Event<Record * Exception>()
@@ -38,11 +38,11 @@ type private ReactoKinesixProcessor (kinesis    : IAmazonKinesis,
             reraise()
 
     let updateHeartbeat _ = 
-        (fun () -> DynamoDBUtils.updateHeartbeat dynamoDB tableName workerId shardId)
+        (fun () -> DynamoDBUtils.updateHeartbeat dynamoDB tableName workerId shardId |> Async.RunSynchronously)
         |> catchCondCheck
 
     let updateCheckpoint seqNum =
-        (fun () -> DynamoDBUtils.updateCheckpoint seqNum dynamoDB tableName workerId shardId)
+        (fun () -> DynamoDBUtils.updateCheckpoint seqNum dynamoDB tableName workerId shardId |> Async.RunSynchronously)
         |> catchCondCheck
 
     let fetchNextRecords iterator = 
@@ -85,13 +85,17 @@ type private ReactoKinesixProcessor (kinesis    : IAmazonKinesis,
                         |> Seq.reduce (fun _ lastRes -> lastRes)
 
                     match lastResult with
-                    | Some (Success _)           -> batchProcessedEvent.Trigger(count, iterator)
-                    | Some (Failure (seqNum, _)) -> batchProcessedEvent.Trigger(count, NoIteratorToken <| AtSequenceNumber seqNum))
+                    | Some (Success seqNum)      -> 
+                        updateCheckpoint(seqNum)
+                        batchProcessedEvent.Trigger(count, iterator)
+                    | Some (Failure (seqNum, _)) -> 
+                        updateCheckpoint(seqNum)
+                        batchProcessedEvent.Trigger(count, NoIteratorToken <| AtSequenceNumber seqNum))
 
     let initSub = Observable
                     .FromAsync(DynamoDBUtils.getShardStatus dynamoDB config tableName shardId)
                     .Subscribe(function 
-                        | New 
+                        | New(workerId', _) when workerId' = workerId
                             -> // the shard has not been processed before, so start from the oldest record
                                fetchNextRecords (NoIteratorToken <| TrimHorizon) |> Async.StartImmediate
                         | NotProcessing(_, _, seqNum)
@@ -116,28 +120,51 @@ type private ReactoKinesixProcessor (kinesis    : IAmazonKinesis,
             receivedSub.Dispose()
             initSub.Dispose()
 
-type private ReactoKinesix (streamName, workerId, shardId, config) =
-    
-
-    do ()
-
 type ReactoKinesixApp (awsKey     : string, 
                        awsSecret  : string, 
                        region     : RegionEndpoint,
                        appName    : string,
                        streamName : string,
                        ?config    : ReactoKinesixConfig) =
-    let config     = defaultArg config <| new ReactoKinesixConfig()
+    let config = defaultArg config <| new ReactoKinesixConfig()
     do Utils.validateConfig config
+
+    let stateTableCreatedEvent      = new Event<TableName>()
 
     let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
     let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region) 
     
     let streamName = StreamName streamName
 
-    // initialize the application
-    let tableName  = DynamoDBUtils.initStateTable dynamoDB config appName
-    let shards     = KinesisUtils.getShards kinesis streamName
-    do shards 
-       |> Seq.map (fun shard -> DynamoDBUtils.createShard dynamoDB tableName (WorkerId "ME") (ShardId shard.ShardId))
-       |> Seq.iter (fun shard -> ())
+    let tableCreated = Observable.FromAsync(DynamoDBUtils.initStateTable dynamoDB config appName)
+    let tableReady   = tableCreated.SelectMany(fun tableName -> Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName))
+
+    // app is initialized when the app's state table is fully created
+    let initialized  = tableCreated.Zip(tableReady, fun tableName _ -> tableName)    
+
+    let start workerId action =
+        let workerId  = WorkerId workerId
+
+        // wait for the app to be initialized
+        let tableName = initialized.Wait()
+
+        async {
+            let! shards = KinesisUtils.getShards kinesis streamName
+            let! createdShards = 
+                shards
+                |> Seq.map (fun shard -> 
+                    async { 
+                        let! isCreated = DynamoDBUtils.createShard dynamoDB tableName workerId (ShardId shard.ShardId)
+                        return shard, isCreated
+                    })
+                |> Async.Parallel
+
+            let workers = createdShards 
+                            |> Array.filter snd 
+                            |> Array.map (fun (shard, _) -> new ReactoKinesix(kinesis, dynamoDB, config, tableName, streamName, workerId, ShardId shard.ShardId, action))
+
+            return { new IDisposable with member this.Dispose () = workers |> Array.iter (fun p -> (p :> IDisposable).Dispose()) }
+        }
+        |> Async.StartAsTask
+
+    member this.Start(workerId : string, action : Action<Record>) = start workerId action.Invoke

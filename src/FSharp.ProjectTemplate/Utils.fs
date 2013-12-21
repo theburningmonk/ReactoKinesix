@@ -50,14 +50,17 @@ module internal Utils =
 
 module internal KinesisUtils =
     type IAmazonKinesis with
-        member this.GetShardIteratorAsync req = Async.FromBeginEnd(req, this.BeginGetShardIterator, this.EndGetShardIterator)
-        member this.GetRecordsAsync req = Async.FromBeginEnd(req, this.BeginGetRecords, this.EndGetRecords)
+        member this.GetRecordsAsync req       = Async.FromBeginEnd(req, this.BeginGetRecords, this.EndGetRecords)
+        member this.GetShardIteratorAsync req = Async.FromBeginEnd(req, this.BeginGetShardIterator, this.EndGetShardIterator)        
+        member this.DescribeStreamAsync req   = Async.FromBeginEnd(req, this.BeginDescribeStream, this.EndDescribeStream)
 
     /// Returns the shards that are part of the stream
     let getShards (kinesis : IAmazonKinesis) (StreamName streamName) =
-        let req = new DescribeStreamRequest(StreamName = streamName)
-        let res = kinesis.DescribeStream(req)
-        res.StreamDescription.Shards
+        async {
+            let req = new DescribeStreamRequest(StreamName = streamName)
+            let! res = kinesis.DescribeStreamAsync(req)
+            return res.StreamDescription.Shards
+        }
 
     /// Returns the shard iterator for the specified shard in the stream
     let getShardIterator (kinesis : IAmazonKinesis) 
@@ -77,14 +80,14 @@ module internal KinesisUtils =
                 req.StartingSequenceNumber  <- seqNum
                 req.ShardIteratorType       <- ShardIteratorType.AFTER_SEQUENCE_NUMBER
             | Latest ->
-                req.ShardIteratorType       <- ShardIteratorType.LATEST                
+                req.ShardIteratorType       <- ShardIteratorType.LATEST
 
             let! res = kinesis.GetShardIteratorAsync(req)
             return res.ShardIterator
         }
 
     /// Returns a number of records from the shard in the stream along with the next shard iterator
-    let getRecords (kinesis : IAmazonKinesis) streamName shardId iterator =        
+    let getRecords (kinesis : IAmazonKinesis) streamName shardId iterator = 
         async {
             let req = GetRecordsRequest()
 
@@ -100,7 +103,11 @@ module internal KinesisUtils =
 
 module internal DynamoDBUtils =
     type IAmazonDynamoDB with
-        member this.GetItemAsync req = Async.FromBeginEnd(req, this.BeginGetItem, this.EndGetItem)
+        member this.DescribeTableAsync req  = Async.FromBeginEnd(req, this.BeginDescribeTable, this.EndDescribeTable)
+        member this.GetItemAsync req        = Async.FromBeginEnd(req, this.BeginGetItem, this.EndGetItem)        
+        member this.ListTablesAsync req     = Async.FromBeginEnd(req, this.BeginListTables, this.EndListTables)
+        member this.PutItemAsync req        = Async.FromBeginEnd(req, this.BeginPutItem, this.EndPutItem)
+        member this.UpdateItemAsync req     = Async.FromBeginEnd(req, this.BeginUpdateItem, this.EndUpdateItem)
 
     let private shardIdAttr, lastHeartbeatAttr, workerIdAttr, checkpointAttr = 
         "ShardId", "LastHeartbeat", "WorkerId", "SequenceNumberCheckpoint"
@@ -114,60 +121,83 @@ module internal DynamoDBUtils =
         | true, x -> Some x.S
         | _ -> None
 
-    let (|NoShard|Shard|) (res : GetItemResponse) =
+    let private (|NoShard|Shard|) (res : GetItemResponse) =
         match tryGetAttributeValue res.Item shardIdAttr with
         | None -> NoShard
-        | _ -> let workerId, heartbeat, checkpoint = 
-                    tryGetAttributeValue res.Item workerIdAttr,
-                    tryGetAttributeValue res.Item lastHeartbeatAttr,
+        | _ -> // the shard creation should always ensure that worker ID and heartbeat is created
+               // but the checkpoint is only set the first time we were able to get records from
+               // the stream and processed them
+               let workerId, heartbeat, checkpoint = 
+                    res.Item.[workerIdAttr].S,
+                    res.Item.[lastHeartbeatAttr].S,
                     tryGetAttributeValue res.Item checkpointAttr
-               Shard(workerId, heartbeat, checkpoint)
+               Shard(WorkerId workerId, fromHeartbeatTimestamp heartbeat, checkpoint)
 
     /// Returns the list of tables that currently exist in DynamoDB
     let getTables (dynamoDB : IAmazonDynamoDB) =
-        let req = new ListTablesRequest()
-        dynamoDB.ListTables(req).TableNames
+        async {
+            let req  = new ListTablesRequest()
+            let! res = dynamoDB.ListTablesAsync(req)
+            return res.TableNames
+        }
 
     /// Initializes the application state table if necessary and returns the table name
-    let initStateTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) appName = 
+    let initStateTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) appName =         
         let appTableName = sprintf "%s%s" appName config.DynamoDBTableSuffix
 
-        match getTables dynamoDB |> Seq.exists ((=) appTableName) with
-        | false -> TableName appTableName
-        | _     -> 
-            let req = new CreateTableRequest(TableName = appTableName)
-            req.KeySchema.Add(new KeySchemaElement(AttributeName = shardIdAttr, KeyType = KeyType.HASH))
-            req.ProvisionedThroughput.ReadCapacityUnits  <- config.DynamoDBReadThroughput
-            req.ProvisionedThroughput.WriteCapacityUnits <- config.DynamoDBWriteThroughput
-        
-            // TODO : handle exception when table already exists
-            let res = dynamoDB.CreateTable(req)
+        async {
+            let! tableNames = getTables dynamoDB
 
-            TableName res.TableDescription.TableName
+            match tableNames |> Seq.exists ((=) appTableName) with
+            | false -> return TableName appTableName
+            | _     -> 
+                let req = new CreateTableRequest(TableName = appTableName)
+                req.KeySchema.Add(new KeySchemaElement(AttributeName = shardIdAttr, KeyType = KeyType.HASH))
+                req.ProvisionedThroughput.ReadCapacityUnits  <- config.DynamoDBReadThroughput
+                req.ProvisionedThroughput.WriteCapacityUnits <- config.DynamoDBWriteThroughput
+        
+                // TODO : handle exception when table already exists
+                let res = dynamoDB.CreateTable(req)
+
+                return TableName res.TableDescription.TableName
+        }
+
+    /// Waits till the DynamoDB table is ready
+    let rec awaitStateTableReady (dynamoDB : IAmazonDynamoDB) (TableName tableName as tn) =
+        async {
+            let req = new DescribeTableRequest(TableName = tableName)
+            let! res = dynamoDB.DescribeTableAsync(req)
+
+            do! Async.Sleep(1000)
+            if res.Table.TableStatus = TableStatus.CREATING then
+                return! awaitStateTableReady dynamoDB tn
+        }
 
     /// Puts a shard into the shard conditionally against the worker ID so that if another worker has
     /// already added the shard then we don't proceed
     let createShard (dynamoDB : IAmazonDynamoDB) (TableName tableName) (WorkerId workerId) (ShardId shardId) =
-        let req = new PutItemRequest(TableName = tableName)
-        req.Item.Add(shardIdAttr, new AttributeValue(S = shardId))
-        req.Item.Add(workerIdAttr, new AttributeValue(S = workerId))
-        req.Item.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
+        async {
+            let req = new PutItemRequest(TableName = tableName)
+            req.Item.Add(shardIdAttr, new AttributeValue(S = shardId))
+            req.Item.Add(workerIdAttr, new AttributeValue(S = workerId))
+            req.Item.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
         
-        req.Expected.Add(workerIdAttr, new ExpectedAttributeValue(Exists = false))
+            req.Expected.Add(workerIdAttr, new ExpectedAttributeValue(Exists = false))
 
-        try
-            dynamoDB.PutItem(req) |> ignore
-            true
-        with
-        // TODO: handle case when conditional check failed (someone else already created the shard) differently
-        // from other exceptions (throughput exceeded, etc.)
-        | _ -> false
+            try
+                do! dynamoDB.PutItemAsync(req) |> Async.Ignore
+                return true
+            with
+            // TODO: handle case when conditional check failed (someone else already created the shard) differently
+            // from other exceptions (throughput exceeded, etc.)
+            | _ -> return false
+        }
 
     /// Returns the current status of the shard
     let getShardStatus (dynamoDB : IAmazonDynamoDB) 
                        (config   : ReactoKinesixConfig)
                        (TableName tableName)
-                       (ShardId shardId) =
+                       (ShardId   shardId) =
         async {
             let req = new GetItemRequest(TableName = tableName, ConsistentRead = true)
             req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
@@ -179,47 +209,38 @@ module internal DynamoDBUtils =
             match res with
             | NoShard -> return ShardStatus.Removed
             | Shard(workerId, heartbeat, checkpoint) ->
-                match heartbeat, workerId, checkpoint with
-                | None, _, _ -> ShardStatus.New
+                let now = DateTime.UtcNow
 
-                //tryGetAttributeValue res.Item checkpointAttr, 
-                      
-                match tryGetAttributeValue res.Item lastHeartbeatAttr with
-                // if a queue never registered a heartbeat then it's definitely new
-                | None -> return ShardStatus.New
-                | Some heartbeat
-                    ->                     
-                    
-                       let workerId  = defaultArg (tryGetAttributeValue res.Item workerIdAttr) "" |> WorkerId
-                       let heartbeat = fromHeartbeatTimestamp heartbeat
-                       let seqNum    = SequenceNumber checkpoint
-                   
-                       if DateTime.UtcNow - heartbeat < config.HeartbeatTimeout 
-                       then return ShardStatus.Processing(workerId, seqNum)
-                       else return ShardStatus.NotProcessing(workerId, heartbeat, seqNum)                
+                match checkpoint with
+                | None -> return ShardStatus.New(workerId, heartbeat)
+                | Some seqNum when now - heartbeat < config.HeartbeatTimeout 
+                    -> return ShardStatus.Processing(workerId, SequenceNumber seqNum)
+                | Some seqNum -> return ShardStatus.NotProcessing(workerId, heartbeat, SequenceNumber seqNum)
         }
 
     /// Updates a shard conditionally against the worker ID so that if for some reason another worker has
     /// taken over processing of this shard then we shall stop further processing
-    let private updateShard (update : UpdateItemRequest -> unit) 
+    let private updateShard (update   : UpdateItemRequest -> unit) 
                             (dynamoDB : IAmazonDynamoDB) 
-                            (TableName tableName) 
-                            (WorkerId workerId) 
-                            (ShardId shardId) =
-        let req = new UpdateItemRequest(TableName = tableName)
-        req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
+                            (TableName  tableName) 
+                            (WorkerId   workerId) 
+                            (ShardId    shardId) =
+        async {
+            let req = new UpdateItemRequest(TableName = tableName)
+            req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
         
-        let expectedAttrVal = new ExpectedAttributeValue(Value = new AttributeValue(S = workerId), Exists = true)
-        req.Expected.Add(workerIdAttr, expectedAttrVal)
+            let expectedAttrVal = new ExpectedAttributeValue(Value = new AttributeValue(S = workerId), Exists = true)
+            req.Expected.Add(workerIdAttr, expectedAttrVal)
         
-        update req
+            update req
 
-        // TODO : handle exceptions - conditional check = stop, other = retry?
-        dynamoDB.UpdateItem(req) |> ignore
+            // TODO : handle exceptions - conditional check = stop, other = retry?
+            do! dynamoDB.UpdateItemAsync(req) |> Async.Ignore
+        }
 
     /// Updates the heartbeat value for the specified shard conditionally against the worker ID so that
     /// if for some reason another worker has taken over this shard then we shall stop processing this shard
-    let updateHeartbeat : IAmazonDynamoDB -> TableName -> WorkerId -> ShardId -> unit = 
+    let updateHeartbeat : IAmazonDynamoDB -> TableName -> WorkerId -> ShardId -> Async<unit> = 
         let update (req : UpdateItemRequest) = req.Key.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
 
         updateShard update
