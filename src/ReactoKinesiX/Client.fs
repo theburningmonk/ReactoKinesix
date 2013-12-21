@@ -1,6 +1,7 @@
 ﻿namespace ReactoKinesix
 
 open System
+open System.Collections.Concurrent
 open System.Reactive
 open System.Reactive.Linq
 open System.Threading
@@ -221,8 +222,13 @@ type ReactoKinesixApp (awsKey     : string,
                        appName    : string,
                        streamName : string,
                        ?config    : ReactoKinesixConfig) =
+    static let runningApps = new ConcurrentDictionary<string, string>()
+    
     let config = defaultArg config <| new ReactoKinesixConfig()
     do Utils.validateConfig config
+
+    do if not <| runningApps.TryAdd(appName, streamName) 
+       then raise <| AppNameIsAlreadyRunning streamName
 
     let loggerName = sprintf "ReactoKinesixApp[AppName:%s, Stream:%O]" appName streamName
     let logger     = LogManager.GetLogger(loggerName)

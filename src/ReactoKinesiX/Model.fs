@@ -33,6 +33,9 @@ exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
 /// Thorwn when initialization of the app failed with the attached inner exception
 exception InitializationFailed of Exception
 
+/// Thrown when an app with the same name 
+exception AppNameIsAlreadyRunning of string
+
 [<AutoOpen>]
 module internal InternalModel =
     type StreamName = 
