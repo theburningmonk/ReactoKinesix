@@ -5,6 +5,8 @@ open System.Collections.Generic
 open System.Globalization
 open System.Reactive.Linq
 
+open log4net
+
 open Amazon.DynamoDBv2
 open Amazon.DynamoDBv2.Model
 open Amazon.Kinesis
@@ -17,6 +19,14 @@ module internal Utils =
     let validateConfig (config : ReactoKinesixConfig) =
         if config.HeartbeatTimeout < config.Heartbeat then
             raise <| InvalidHeartbeatConfiguration(config.Heartbeat, config.HeartbeatTimeout)
+
+    let log (logger : ILog) format (args : obj[]) = 
+        if logger.IsDebugEnabled then logger.DebugFormat(format, args)
+
+    let logException (logger : ILog) exn format (args : obj[]) = 
+        if logger.IsErrorEnabled then 
+            let msg = String.Format(format, args)
+            logger.Error(msg, exn)
 
     /// Extension methods to the Rx Observable type
     type Observable with
@@ -54,11 +64,20 @@ module internal KinesisUtils =
         member this.GetShardIteratorAsync req = Async.FromBeginEnd(req, this.BeginGetShardIterator, this.EndGetShardIterator)        
         member this.DescribeStreamAsync req   = Async.FromBeginEnd(req, this.BeginDescribeStream, this.EndDescribeStream)
 
+    let private logger = LogManager.GetLogger("KinesisUtils")
+    let private log    = log logger
+    
     /// Returns the shards that are part of the stream
     let getShards (kinesis : IAmazonKinesis) (StreamName streamName) =
         async {
             let req = new DescribeStreamRequest(StreamName = streamName)
-            let! res = kinesis.DescribeStreamAsync(req)
+            let! res = kinesis.DescribeStreamAsync(req)         
+               
+            log "Stream [{0}] has [{1}] shards: [{2}]"
+                [| res.StreamDescription.StreamName
+                   res.StreamDescription.Shards.Count
+                   String.Join(",", res.StreamDescription.Shards |> Seq.map(fun shard -> shard.ShardId)) |]
+
             return res.StreamDescription.Shards
         }
 
@@ -83,6 +102,10 @@ module internal KinesisUtils =
                 req.ShardIteratorType       <- ShardIteratorType.LATEST
 
             let! res = kinesis.GetShardIteratorAsync(req)
+
+            log "Received shard iterator [{0}], type [{1}] for stream [{2}], shard [{3}]"
+                [| res.ShardIterator; req.ShardIteratorType; streamName; shardId |]
+
             return res.ShardIterator
         }
 
@@ -98,11 +121,16 @@ module internal KinesisUtils =
                 req.ShardIterator <- token
 
             let res = kinesis.GetRecords(req)
+
+            log "Received [{0}] records from stream [{1}], shard [{2}]"
+                [| res.Records.Count; streamName; shardId |]
+
             return res.NextShardIterator, res.Records :> Record seq
         }
 
 module internal DynamoDBUtils =
     type IAmazonDynamoDB with
+        member this.CreateTableAsync req    = Async.FromBeginEnd(req, this.BeginCreateTable, this.EndCreateTable)
         member this.DescribeTableAsync req  = Async.FromBeginEnd(req, this.BeginDescribeTable, this.EndDescribeTable)
         member this.GetItemAsync req        = Async.FromBeginEnd(req, this.BeginGetItem, this.EndGetItem)        
         member this.ListTablesAsync req     = Async.FromBeginEnd(req, this.BeginListTables, this.EndListTables)
@@ -111,6 +139,10 @@ module internal DynamoDBUtils =
 
     let private shardIdAttr, lastHeartbeatAttr, workerIdAttr, checkpointAttr = 
         "ShardId", "LastHeartbeat", "WorkerId", "SequenceNumberCheckpoint"
+
+    let private logger       = LogManager.GetLogger("KinesisUtils")
+    let private log          = log logger
+    let private logException = logException logger
 
     let private dateTimeFormat = "yyyy-MM-dd HH:mm:ss.fffffff"
     let private getHeartbeatTimestamp ()   = DateTime.UtcNow.ToString(dateTimeFormat)
@@ -138,18 +170,26 @@ module internal DynamoDBUtils =
         async {
             let req  = new ListTablesRequest()
             let! res = dynamoDB.ListTablesAsync(req)
+
+            log "DynamoDB returned [{0}] tables : [{1}]"
+                [| res.TableNames.Count; String.Join(",", res.TableNames) |]
+
             return res.TableNames
         }
 
     /// Initializes the application state table if necessary and returns the table name
-    let initStateTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) appName =         
+    let initStateTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) appName =
         let appTableName = sprintf "%s%s" appName config.DynamoDBTableSuffix
+
+        log "Initiating state table [{0}] for app [{1}]" [| appTableName; appName |]
 
         async {
             let! tableNames = getTables dynamoDB
 
             match tableNames |> Seq.exists ((=) appTableName) with
-            | false -> return TableName appTableName
+            | false -> 
+                log "State table [{0}] already exists for app [{1}]" [| appTableName; appName |]
+                return TableName appTableName
             | _     -> 
                 let req = new CreateTableRequest(TableName = appTableName)
                 req.KeySchema.Add(new KeySchemaElement(AttributeName = shardIdAttr, KeyType = KeyType.HASH))
@@ -157,7 +197,12 @@ module internal DynamoDBUtils =
                 req.ProvisionedThroughput.WriteCapacityUnits <- config.DynamoDBWriteThroughput
         
                 // TODO : handle exception when table already exists
-                let res = dynamoDB.CreateTable(req)
+                let! res = dynamoDB.CreateTableAsync(req)
+
+                log "Created state table [{0}] for app [{1}], current status [{2}], read throughput [{3}], write throughput [{4}]"
+                    [| appTableName; appName; res.TableDescription.TableStatus; 
+                       res.TableDescription.ProvisionedThroughput.ReadCapacityUnits;
+                       res.TableDescription.ProvisionedThroughput.WriteCapacityUnits |]
 
                 return TableName res.TableDescription.TableName
         }
@@ -168,15 +213,20 @@ module internal DynamoDBUtils =
             let req = new DescribeTableRequest(TableName = tableName)
             let! res = dynamoDB.DescribeTableAsync(req)
 
-            do! Async.Sleep(1000)
+            log "State table [{0}] current status [{1}]" [| tableName; res.Table.TableStatus |]
+            
             if res.Table.TableStatus = TableStatus.CREATING then
+                do! Async.Sleep(1000)
                 return! awaitStateTableReady dynamoDB tn
+            else log "State table [{0}] is considered ready (not in CREATING status)" [| tableName |]
         }
 
     /// Puts a shard into the shard conditionally against the worker ID so that if another worker has
     /// already added the shard then we don't proceed
     let createShard (dynamoDB : IAmazonDynamoDB) (TableName tableName) (WorkerId workerId) (ShardId shardId) =
         async {
+            log "Creating shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
+
             let req = new PutItemRequest(TableName = tableName)
             req.Item.Add(shardIdAttr, new AttributeValue(S = shardId))
             req.Item.Add(workerIdAttr, new AttributeValue(S = workerId))
@@ -186,11 +236,15 @@ module internal DynamoDBUtils =
 
             try
                 do! dynamoDB.PutItemAsync(req) |> Async.Ignore
+
+                log "Created shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
                 return true
             with
             // TODO: handle case when conditional check failed (someone else already created the shard) differently
             // from other exceptions (throughput exceeded, etc.)
-            | _ -> return false
+            | exn ->                 
+                logException exn "Failed to create shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
+                return false
         }
 
     /// Returns the current status of the shard
@@ -203,13 +257,20 @@ module internal DynamoDBUtils =
             req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
             req.AttributesToGet.AddRange([| workerIdAttr; checkpointAttr; lastHeartbeatAttr |])
 
-            // TODO : handle exceptoins
+            log "Getting current status of shard [{1}] from state table [{0}]" [| tableName; shardId |]
+
+            // TODO : handle exceptions
             let! res = dynamoDB.GetItemAsync(req)
 
             match res with
-            | NoShard -> return ShardStatus.Removed
+            | NoShard -> 
+                log "Shard [{1}] not found in state tabe [{1}]" [| tableName; shardId |]
+                return ShardStatus.Removed
             | Shard(workerId, heartbeat, checkpoint) ->
                 let now = DateTime.UtcNow
+
+                log "Shard [{1}] found in state table [{1}], worker [{2}], last heartbeat [{3}], sequence number checkpoint [{4}]"
+                    [| tableName; shardId; workerId; heartbeat; checkpoint |]
 
                 match checkpoint with
                 | None -> return ShardStatus.New(workerId, heartbeat)
@@ -236,6 +297,8 @@ module internal DynamoDBUtils =
 
             // TODO : handle exceptions - conditional check = stop, other = retry?
             do! dynamoDB.UpdateItemAsync(req) |> Async.Ignore
+
+            log "Updated shard [{0}] for worker [{1}] in state table [{0}]" [| tableName; workerId; shardId |]
         }
 
     /// Updates the heartbeat value for the specified shard conditionally against the worker ID so that

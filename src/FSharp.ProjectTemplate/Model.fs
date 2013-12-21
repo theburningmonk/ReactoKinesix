@@ -26,11 +26,25 @@ exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
 
 [<AutoOpen>]
 module internal InternalModel =
-    type StreamName     = StreamName     of string
-    type TableName      = TableName      of string
-    type ShardId        = ShardId        of string
-    type WorkerId       = WorkerId       of string
-    type SequenceNumber = SequenceNumber of string
+    type StreamName = 
+        | StreamName of string
+        override this.ToString () = match this with | StreamName name -> name
+
+    type TableName = 
+        | TableName of string
+        override this.ToString () = match this with | TableName name -> name
+
+    type ShardId = 
+        | ShardId of string
+        override this.ToString () = match this with | ShardId id -> id
+
+    type WorkerId = 
+        | WorkerId of string
+        override this.ToString () = match this with | WorkerId id -> id
+
+    type SequenceNumber = 
+        | SequenceNumber of string
+        override this.ToString () = match this with | SequenceNumber seqNum -> seqNum
 
     type IteratorType   = 
         | TrimHorizon                               // starting at the trim horizon (i.e. earliest record available)
