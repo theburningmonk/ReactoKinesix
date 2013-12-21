@@ -122,7 +122,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
     let checkpointLogSub = checkpointEvent.Publish.Subscribe(fun seqNum -> log "Updating sequence number checkpoint [{0}]" [| seqNum |])
     
     let nextBatch       = startedEvent.Publish                            
-                            .Merge(Observable.Delay(emptyReceiveEvent.Publish, TimeSpan.FromSeconds(3.0)))
+                            .Merge(Observable.Delay(emptyReceiveEvent.Publish, config.EmptyReceiveDelay))
                             .Merge(checkpointEvent.Publish.Select(fun _ -> ()))
 
     let fetch           = batchProcessedEvent.Publish

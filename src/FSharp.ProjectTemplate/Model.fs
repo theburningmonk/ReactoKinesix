@@ -21,6 +21,9 @@ type ReactoKinesixConfig () =
     /// Timeout for the heartbeat check. Default is 3 minutes.
     member val HeartbeatTimeout        = TimeSpan.FromMinutes(3.0) with get, set
 
+    /// Delay in trying to pull the stream if the last pull returned no records. Default is 3 second.
+    member val EmptyReceiveDelay       = TimeSpan.FromSeconds(3.0) with get, set
+
 /// Thrown when the configuration specifies a heartbeat frequence that's greater than the heartbeat timeout
 exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
 
