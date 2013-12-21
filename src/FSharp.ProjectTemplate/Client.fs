@@ -231,7 +231,10 @@ type ReactoKinesixApp (awsKey     : string,
     
     let streamName = StreamName streamName
 
-    let tableName  = DynamoDBUtils.initStateTable dynamoDB config appName |> Async.RunSynchronously
+    let initResult = DynamoDBUtils.initStateTable dynamoDB config appName |> Async.RunSynchronously
+    let tableName  = match initResult with 
+                     | Success tableName -> tableName 
+                     | Failure(_, exn)   -> raise <| InitializationFailed exn
 
     let tableReady = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
 

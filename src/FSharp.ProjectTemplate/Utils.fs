@@ -189,7 +189,7 @@ module internal DynamoDBUtils =
             match tableNames |> Seq.exists ((=) appTableName) with
             | true -> 
                 log "State table [{0}] already exists for app [{1}]" [| appTableName; appName |]
-                return TableName appTableName
+                return Success(TableName appTableName)
             | _     -> 
                 let req = new CreateTableRequest(TableName = appTableName)
                 req.AttributeDefinitions.Add(new AttributeDefinition(AttributeName = shardIdAttr, AttributeType = ScalarAttributeType.S))
@@ -197,15 +197,22 @@ module internal DynamoDBUtils =
                 req.ProvisionedThroughput <- new ProvisionedThroughput(ReadCapacityUnits  = config.DynamoDBReadThroughput,
                                                                        WriteCapacityUnits = config.DynamoDBWriteThroughput)
         
-                // TODO : handle exception when table already exists
-                let! res = dynamoDB.CreateTableAsync(req)
+                let! res = dynamoDB.CreateTableAsync(req) |> Async.Catch
+                match res with
+                | Choice1Of2 res -> 
+                    log "Created state table [{0}] for app [{1}], current status [{2}], read throughput [{3}], write throughput [{4}]"
+                        [| appTableName; appName; res.TableDescription.TableStatus; 
+                           res.TableDescription.ProvisionedThroughput.ReadCapacityUnits;
+                           res.TableDescription.ProvisionedThroughput.WriteCapacityUnits |]
 
-                log "Created state table [{0}] for app [{1}], current status [{2}], read throughput [{3}], write throughput [{4}]"
-                    [| appTableName; appName; res.TableDescription.TableStatus; 
-                       res.TableDescription.ProvisionedThroughput.ReadCapacityUnits;
-                       res.TableDescription.ProvisionedThroughput.WriteCapacityUnits |]
-
-                return TableName res.TableDescription.TableName
+                    return Success(TableName appTableName)
+                | Choice2Of2 exn ->
+                    match exn with
+                    | :? ResourceInUseException -> 
+                        // already exists (perhaps race condition with multiple workers trying to create table at the same time)
+                        log "(Possible race condition) State table [{0}] already exists for app [{1}]" [| appTableName; appName |]
+                        return Success(TableName appTableName)
+                    | _ -> return Failure((), exn)
         }
 
     /// Waits till the DynamoDB table is ready

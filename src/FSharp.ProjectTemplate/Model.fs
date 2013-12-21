@@ -27,6 +27,9 @@ type ReactoKinesixConfig () =
 /// Thrown when the configuration specifies a heartbeat frequence that's greater than the heartbeat timeout
 exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
 
+/// Thorwn when initialization of the app failed with the attached inner exception
+exception InitializationFailed of Exception
+
 [<AutoOpen>]
 module internal InternalModel =
     type StreamName = 
@@ -68,6 +71,8 @@ module internal InternalModel =
         // the shard is currently being processed by a worker
         | Processing    of WorkerId * SequenceNumber                
 
-    type ProcessResult  = 
-        | Success   of SequenceNumber
-        | Failure   of SequenceNumber * Exception
+    type Result<'Success, 'Failure> =
+        | Success   of 'Success
+        | Failure   of 'Failure * Exception
+
+    type ProcessResult  = Result<SequenceNumber, SequenceNumber>
