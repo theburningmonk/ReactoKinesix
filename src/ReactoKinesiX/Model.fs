@@ -33,6 +33,9 @@ type ReactoKinesixConfig () =
     /// How frequenty should we check for shard merges/splits in the stream. Default is 1 minute.
     member val CheckStreamChangesFrequency  = TimeSpan.FromMinutes(1.0) with get, set
 
+    /// How frequently should we check for shards whose worker has died. Default is 1 minute.
+    member val CheckUnprocessedShardsFrequency = TimeSpan.FromMilliseconds(1.0) with get, set
+
 [<AutoOpen>]
 module Exceptions =
     /// Thrown when the configuration specifies a heartbeat frequence that's greater than the heartbeat timeout
@@ -52,6 +55,9 @@ module Exceptions =
 
     /// Thrown when trying to get records from a closed shard whose records have been exhausted
     exception ShardCannotBeIteratedException
+
+    /// Thrown when trying to initialize a worker but its shard cannot be found in the DynamoDB
+    exception ShardNotFoundException
 
 [<AutoOpen>]
 module internal InternalModel =
@@ -100,12 +106,10 @@ module internal InternalModel =
     type ShardStatus    = 
         | NotFound      // the shard was not found
         | Closed        // the shard was closed
-        // the shard is new and has not been processed
-        | New           of WorkerId * DateTime
         // the shard is there but not currently being processed
-        | NotProcessing of WorkerId * DateTime * SequenceNumber
+        | NotProcessing of WorkerId * DateTime * SequenceNumber option
         // the shard is currently being processed by a worker
-        | Processing    of WorkerId * SequenceNumber                
+        | Processing    of WorkerId * SequenceNumber option
 
     type Result<'Success, 'Failure> =
         | Success   of 'Success
@@ -117,4 +121,3 @@ module internal InternalModel =
         | StartWorker      of ShardId * AsyncReplyChannel<unit>
         | StopWorker       of ShardId * AsyncReplyChannel<unit>
         | AddKnownShard    of ShardId * AsyncReplyChannel<unit>
-        | RemoveKnownShard of ShardId * AsyncReplyChannel<unit>

@@ -358,11 +358,13 @@ module internal DynamoDBUtils =
                     logDebug "Shard [{1}] found in state table [{0}], worker [{2}], last heartbeat [{3}], sequence number checkpoint [{4}]"
                              [| tableName; shardId; workerId; heartbeat; checkpoint |]
 
-                    match checkpoint with
-                    | None -> return Success <| ShardStatus.New(workerId, heartbeat)
-                    | Some seqNum when now - heartbeat < config.HeartbeatTimeout 
-                        -> return Success <| ShardStatus.Processing(workerId, SequenceNumber seqNum)
-                    | Some seqNum -> return Success <| ShardStatus.NotProcessing(workerId, heartbeat, SequenceNumber seqNum)
+                    let seqNum = match checkpoint with 
+                                 | Some seqNum -> Some(SequenceNumber seqNum)
+                                 | _ -> None
+
+                    if now - heartbeat < config.HeartbeatTimeout 
+                    then return Success <| ShardStatus.Processing(workerId, seqNum)
+                    else return Success <| ShardStatus.NotProcessing(workerId, heartbeat, seqNum)
         }
 
     /// Updates a shard conditionally against the worker ID so that if for some reason another worker has
@@ -413,4 +415,12 @@ module internal DynamoDBUtils =
             let newIsClosedValue = new AttributeValue(S = isClosed.ToString())
             req.AttributeUpdates.Add(isClosedAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newIsClosedValue))
                         
+        updateShard update
+
+    /// Updates the worker ID field for the specified shard conditionaly against the old worker ID
+    let updateWorkerId (WorkerId newWorkerId) =
+        let update (req : UpdateItemRequest) =
+            let newWorkerIdValue = new AttributeValue(S = newWorkerId)
+            req.AttributeUpdates.Add(workerIdAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newWorkerIdValue))
+
         updateShard update

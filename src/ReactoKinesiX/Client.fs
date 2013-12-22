@@ -52,40 +52,44 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
     let cts = new CancellationTokenSource();
 
     let updateHeartbeat _ = 
-        let work = async {
-            let! res = DynamoDBUtils.updateHeartbeat app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
-            match res with
-            | Choice1Of2 () -> heartbeatEvent.Trigger()
-            | Choice2Of2 ex -> match ex with 
-                               | :? ConditionalCheckFailedException -> 
-                                    conditionalCheckFailedEvent.Trigger()
-                                    dispose()
-                               | _ -> // TODO : what's the right thing to do here?
-                                      // a) give up, let the next cycle (or next checkpoint update) update the heartbeat
-                                      // b) retry a few times
-                                      // c) retry until we succeed
-                                      // for now, try option a) as it's not entirely critical for one heartbeat update to
-                                      // succeed, if problem is with DynamoDB and it persists then eventually we'll be
-                                      // blocked on the checkpoint update too and either succeed eventualy or some other
-                                      // worker will take over if they were able to successful write to DynamoDB instead
-                                      // of the current worker
-                                      logWarn "Failed to update heartbeat, ignoring..." [||]
-                                      ()
-        }
+        let work = 
+            async {
+                logDebug "Sending heartbeat..." [||]
+
+                let! res = DynamoDBUtils.updateHeartbeat app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
+                match res with
+                | Choice1Of2 () -> heartbeatEvent.Trigger()
+                | Choice2Of2 ex -> match ex with 
+                                   | :? ConditionalCheckFailedException -> 
+                                        conditionalCheckFailedEvent.Trigger()
+                                        dispose()
+                                   | _ -> // TODO : what's the right thing to do here?
+                                          // a) give up, let the next cycle (or next checkpoint update) update the heartbeat
+                                          // b) retry a few times
+                                          // c) retry until we succeed
+                                          // for now, try option a) as it's not entirely critical for one heartbeat update to
+                                          // succeed, if problem is with DynamoDB and it persists then eventually we'll be
+                                          // blocked on the checkpoint update too and either succeed eventualy or some other
+                                          // worker will take over if they were able to successful write to DynamoDB instead
+                                          // of the current worker
+                                          logWarn "Failed to update heartbeat, ignoring..." [||]
+                                          ()
+            }
         Async.Start(work, cts.Token)
 
     let rec updateIsClosed () =
-        let work = async {
-            let! res = DynamoDBUtils.updateIsClosed true app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
-            match res with
-            | Choice1Of2 ()  -> ()
-            | Choice2Of2 exn -> match exn with
-                                | :? ConditionalCheckFailedException ->  
-                                    conditionalCheckFailedEvent.Trigger()
-                                    dispose()
-                                | _ -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
-                                       updateIsClosed()
-        }
+        let work = 
+            async {
+                let! res = DynamoDBUtils.updateIsClosed true app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
+                match res with
+                | Choice1Of2 ()  -> ()
+                | Choice2Of2 exn -> match exn with
+                                    | :? ConditionalCheckFailedException ->  
+                                        conditionalCheckFailedEvent.Trigger()
+                                        dispose()
+                                    | _ -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
+                                           updateIsClosed()
+            }
         Async.Start(work, cts.Token)
 
     let rec updateCheckpoint seqNum = 
@@ -93,7 +97,8 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
             async {
                 let! res = DynamoDBUtils.updateCheckpoint seqNum app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
                 match res with
-                | Choice1Of2 () -> checkpointEvent.Trigger(seqNum)
+                | Choice1Of2 () -> logDebug "Updated sequence number checkpoint [{0}]" [| seqNum |]
+                                   checkpointEvent.Trigger(seqNum)
                 | Choice2Of2 ex -> match ex with 
                                    | :? ConditionalCheckFailedException -> 
                                         conditionalCheckFailedEvent.Trigger()
@@ -123,8 +128,10 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                 let! getRecordsResult = KinesisUtils.getRecords app.Kinesis app.Config app.StreamName shardId iterator
                 match getRecordsResult with
                 | Success(nextIterator, batch) when nextIterator = null -> 
+                    logDebug "Received batch of [{0}] records, no more records will be available (end of shard)" [| Seq.length batch |]
                     batchReceivedEvent.Trigger(EndOfShard, batch)
                 | Success(nextIterator, batch) -> 
+                    logDebug "Received batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length batch |]
                     batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
                 | Failure(exn) -> 
                     match exn with
@@ -136,6 +143,10 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
         try 
             // NOTE: not sure why this type annotation is required to make the type inference happy..
             (app.Processor :> IRecordProcessor).Process(record)
+
+            logDebug "Processed record [PartitionKey:{0}, SequenceNumber:{1}]"
+                     [| record.PartitionKey; record.SequenceNumber |]
+
             recordProcessedEvent.Trigger(record)
             Success(SequenceNumber record.SequenceNumber)
         with
@@ -143,15 +154,12 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
             processErroredEvent.Trigger(record, ex)
             Failure(SequenceNumber record.SequenceNumber, ex)
 
-    let stopProcessing       = conditionalCheckFailedEvent.Publish                                
+    let stopProcessing       = conditionalCheckFailedEvent.Publish.Take(1)
     let stopProcessingLogSub = stopProcessing.Subscribe(fun _ -> logDebug "Stop processing..." [||])
                          
     let heartbeat        = Observable.Interval(app.Config.Heartbeat).TakeUntil(stopProcessing)
-    let heartbeatLogSub  = heartbeat.Subscribe(fun _ -> logDebug "Sending heartbeat..." [||])
     let heartbeatSub     = heartbeat.Subscribe(updateHeartbeat)
 
-    let checkpointLogSub = checkpointEvent.Publish.Subscribe(fun seqNum -> logDebug "Updating sequence number checkpoint [{0}]" [| seqNum |])
-    
     // signal to process the next batch of records that has been received
     let nextBatch       = initializedEvent.Publish
                             .Merge(Observable.Delay(emptyReceiveEvent.Publish, app.Config.EmptyReceiveDelay))
@@ -163,15 +171,13 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
     let fetchSub        = fetch.Subscribe(fun (_, iterator) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
 
     let received        = batchReceivedEvent.Publish
-    let receivedLogSub  = received.Subscribe(fun (iterator, records) -> 
-                            logDebug "Received batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records|])
-
     let processing      = received
                             .Zip(nextBatch, fun receivedBatch _ -> receivedBatch)
                             .TakeUntil(stopProcessing)
-    let processingLogSub = processing.Subscribe(fun (iterator, records) -> logDebug "Start processing batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records |])
     let processingSub   = 
         processing.Subscribe(fun (iterator, records) ->
+            logDebug "Start processing batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records |]
+
             match Seq.isEmpty records with
             | true -> 
                 emptyReceiveEvent.Trigger()
@@ -198,10 +204,6 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                     updateCheckpoint(seqNum)
                     batchProcessedEvent.Trigger(count, NoIteratorToken <| AtSequenceNumber seqNum))
 
-    let processedLogSub = recordProcessedEvent.Publish.Subscribe(fun (record : Record) ->
-                            logDebug "Processed record [PartitionKey:{0}, SequenceNumber:{1}]"
-                                     [| record.PartitionKey; record.SequenceNumber |])
-
     // only deal with the shard closed event the first time we see it
     let _ = shardClosedEvent.Publish
                 .Take(1)
@@ -211,6 +213,10 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
 
     // this is the initialization sequence
     let init = 
+        let getIterator = function
+            | Some seqNum -> NoIteratorToken <| AfterSequenceNumber seqNum
+            | _ -> NoIteratorToken TrimHorizon            
+
         async {
             let! createShardResult = DynamoDBUtils.createShard app.DynamoDB app.TableName app.WorkerId shardId
             match createShardResult with
@@ -225,17 +231,30 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                         logWarn "Shard is not found. Please check if it was manually deleted from DynamoDB." [||]
                         initializationFailedEvent.Trigger(ShardNotFoundException)
                     | Closed   -> shardClosedEvent.Trigger()
-                    | New(workerId', _) when workerId' = app.WorkerId -> 
-                        // the shard has not been processed before, so start from the oldest record
-                        Async.StartImmediate(fetchNextRecords (NoIteratorToken <| TrimHorizon), cts.Token)
-                        initializedEvent.Trigger()
-                    | NotProcessing(_, _, seqNum) -> 
-                        // the shard has not been processed currently, start from the last checkpoint
-                        Async.StartImmediate(fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum), cts.Token)
-                        initializedEvent.Trigger()
+                    | NotProcessing(workerId', heartbeat, seqNum) -> 
+                        logDebug "Taking over shard which was processed by worker [{0}], last heartbeat [{1}] and checkpoint [{2}]"
+                                 [| workerId', heartbeat, seqNum |]
+
+                        // claim ownership of the shard by successfully updating the row
+                        try
+                            do! DynamoDBUtils.updateWorkerId app.WorkerId app.DynamoDB app.TableName workerId' shardId
+
+                            logDebug "Successfullly taken over responsibility for the shard" [||]
+
+                            // the shard has not been processed currently, start from the last checkpoint
+                            Async.Start(fetchNextRecords <| getIterator seqNum, cts.Token)
+                            initializedEvent.Trigger()
+                        with
+                        | :? ConditionalCheckFailedException ->
+                            conditionalCheckFailedEvent.Trigger()
+                            dispose()
+                        | exn -> initializationFailedEvent.Trigger(exn)
+
                     | Processing(workerId', seqNum) when workerId' = app.WorkerId -> 
+                        logDebug "Resuming processing of shard, last checkpoint [{0}]" [| seqNum |]
+
                         // the shard was being processed by this worker, continue from where we left off
-                        Async.StartImmediate(fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum), cts.Token)
+                        Async.Start(fetchNextRecords <| getIterator seqNum, cts.Token)
                         initializedEvent.Trigger()
                     | Processing(workerId', seqNum) ->
                         // the shard is being processed by another worker, for now, give up
@@ -258,9 +277,8 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
 
             cts.Cancel()
 
-            [| stopProcessingLogSub; heartbeatLogSub; heartbeatSub; checkpointLogSub; fetchSub;
-                receivedLogSub; processingLogSub; processingSub; processedLogSub; retryInitSub;
-                (cts :> IDisposable) |]
+            [| stopProcessingLogSub; heartbeatSub; fetchSub;
+               processingSub; retryInitSub; (cts :> IDisposable) |]
             |> Array.iter (fun x -> x.Dispose())
 
             logDebug "Disposed." [||]
@@ -343,16 +361,12 @@ and ReactoKinesixApp (awsKey     : string,
                 | AddKnownShard(shardId, reply) ->
                     knownShards.Add(shardId) |> ignore
                     reply.Reply()
-                | RemoveKnownShard(shardId, reply) ->
-                    knownShards.Remove(shardId) |> ignore
-                    reply.Reply()
         }
     let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn "Controller agent was restarted due to exception :\n {0}" [| exn |])
 
     let startWorker shardId   = controller.PostAndAsyncReply(fun reply -> StartWorker(shardId, reply))
     let stopWorker  shardId   = controller.PostAndAsyncReply(fun reply -> StopWorker(shardId, reply))
     let addKnownShard shardId = controller.PostAndAsyncReply(fun reply -> AddKnownShard(shardId, reply))
-    let rmvKnownShard shardId = controller.PostAndAsyncReply(fun reply -> RemoveKnownShard(shardId, reply))
 
     let updateWorkers (shardIds : string seq) (update : ShardId -> Async<unit>) = 
         async {
@@ -370,7 +384,6 @@ and ReactoKinesixApp (awsKey     : string,
 
             let knownShards = knownShards |> Seq.map (fun (ShardId shardId) -> shardId) |> Set.ofSeq
             let newShards     = Set.difference shardIds knownShards
-            let removedShards = Set.difference knownShards shardIds
 
             if newShards.Count > 0 then
                 let logArgs : obj[] = [| newShards.Count; String.Join(",", newShards) |]
@@ -379,14 +392,6 @@ and ReactoKinesixApp (awsKey     : string,
 
                 logInfo "Starting workers for [{0}] shards : [{1}]" logArgs
                 do! updateWorkers newShards startWorker
-
-            if removedShards.Count > 0 then
-                let logArgs : obj[] = [| removedShards.Count; String.Join(",", removedShards) |]
-                logInfo "Remove [{0}] shards from known shards : [{1}]" logArgs
-                do! updateWorkers newShards rmvKnownShard
-
-                logInfo "Stopping workers for [{0}] shards : [{1}]" logArgs
-                do! updateWorkers newShards stopWorker
        }
     do Async.Start(refresh, cts.Token)
 
