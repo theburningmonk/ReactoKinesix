@@ -21,15 +21,8 @@ open ReactoKinesix.Utils
 type IRecordProcessor = 
     abstract member Process : Record -> unit
 
-type internal ReactoKinesix (kinesis    : IAmazonKinesis,
-                             dynamoDB   : IAmazonDynamoDB,
-                             config     : ReactoKinesixConfig,
-                             tableName  : TableName, 
-                             streamName : StreamName,
-                             workerId   : WorkerId,
-                             shardId    : ShardId,
-                             processor  : IRecordProcessor) as this =
-    let loggerName  = sprintf "ReactorKinesixWorker[Stream:%O, Worker:%O, Shard:%O]" streamName workerId shardId
+type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this =
+    let loggerName  = sprintf "ReactorKinesixWorker[Stream:%O, Worker:%O, Shard:%O]" app.StreamName app.WorkerId shardId
     let logger      = LogManager.GetLogger(loggerName)
     let logDebug    = logDebug logger
     let logInfo     = logInfo  logger
@@ -60,7 +53,7 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
 
     let updateHeartbeat _ = 
         let work = async {
-            let! res = DynamoDBUtils.updateHeartbeat dynamoDB tableName workerId shardId |> Async.Catch
+            let! res = DynamoDBUtils.updateHeartbeat app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
             match res with
             | Choice1Of2 () -> heartbeatEvent.Trigger()
             | Choice2Of2 ex -> match ex with 
@@ -83,7 +76,7 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
 
     let rec updateIsClosed () =
         let work = async {
-            let! res = DynamoDBUtils.updateIsClosed true dynamoDB tableName workerId shardId |> Async.Catch
+            let! res = DynamoDBUtils.updateIsClosed true app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
             match res with
             | Choice1Of2 ()  -> ()
             | Choice2Of2 exn -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
@@ -94,7 +87,7 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
     let rec updateCheckpoint seqNum = 
         let work = 
             async {
-                let! res = DynamoDBUtils.updateCheckpoint seqNum dynamoDB tableName workerId shardId |> Async.Catch
+                let! res = DynamoDBUtils.updateCheckpoint seqNum app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
                 match res with
                 | Choice1Of2 () -> checkpointEvent.Trigger(seqNum)
                 | Choice2Of2 ex -> match ex with 
@@ -123,7 +116,7 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
             | _ -> 
                 logDebug "Fetching next records with iterator [{0}]" [| iterator |]
 
-                let! getRecordsResult = KinesisUtils.getRecords kinesis config streamName shardId iterator
+                let! getRecordsResult = KinesisUtils.getRecords app.Kinesis app.Config app.StreamName shardId iterator
                 match getRecordsResult with
                 | Success(nextIterator, batch) when nextIterator = null -> 
                     batchReceivedEvent.Trigger(EndOfShard, batch)
@@ -137,7 +130,8 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
 
     let processRecord record = 
         try 
-            processor.Process(record)
+            // NOTE: not sure why this type annotation is required to make the type inference happy..
+            (app.Processor :> IRecordProcessor).Process(record)
             recordProcessedEvent.Trigger(record)
             Success(SequenceNumber record.SequenceNumber)
         with
@@ -148,15 +142,15 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
     let stopProcessing       = conditionalCheckFailedEvent.Publish                                
     let stopProcessingLogSub = stopProcessing.Subscribe(fun _ -> logDebug "Stop processing..." [||])
                          
-    let heartbeat        = Observable.Interval(config.Heartbeat).TakeUntil(stopProcessing)
+    let heartbeat        = Observable.Interval(app.Config.Heartbeat).TakeUntil(stopProcessing)
     let heartbeatLogSub  = heartbeat.Subscribe(fun _ -> logDebug "Sending heartbeat..." [||])
     let heartbeatSub     = heartbeat.Subscribe(updateHeartbeat)
 
     let checkpointLogSub = checkpointEvent.Publish.Subscribe(fun seqNum -> logDebug "Updating sequence number checkpoint [{0}]" [| seqNum |])
     
     // signal to process the next batch of records that has been received
-    let nextBatch       = initializedEvent.Publish                            
-                            .Merge(Observable.Delay(emptyReceiveEvent.Publish, config.EmptyReceiveDelay))
+    let nextBatch       = initializedEvent.Publish
+                            .Merge(Observable.Delay(emptyReceiveEvent.Publish, app.Config.EmptyReceiveDelay))
                             .Merge(checkpointEvent.Publish.Select(fun _ -> ()))
 
     // fetch new records after the previous batch has been processed until we need to either stop processing or the shard is closed
@@ -214,17 +208,18 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
     // this is the initialization sequence
     let init = 
         async {
-            let! createShardResult = DynamoDBUtils.createShard dynamoDB tableName workerId shardId
+            let! createShardResult = DynamoDBUtils.createShard app.DynamoDB app.TableName app.WorkerId shardId
             match createShardResult with
             | Failure exn -> initializationFailedEvent.Trigger(exn)
             | Success _   -> 
-                let! getShardStatusResult = DynamoDBUtils.getShardStatus dynamoDB config tableName shardId
+                let! getShardStatusResult = DynamoDBUtils.getShardStatus app.DynamoDB app.Config app.TableName shardId
                 match getShardStatusResult with
                 | Failure exn -> initializationFailedEvent.Trigger(exn)
                 | Success status -> 
                     match status with
-                    | Closed -> shardClosedEvent.Trigger()
-                    | New(workerId', _) when workerId' = workerId -> 
+                    | NotFound -> logWarn "Shard is not found. Please check if it was manually deleted from DynamoDB." [||]
+                    | Closed   -> shardClosedEvent.Trigger()
+                    | New(workerId', _) when workerId' = app.WorkerId -> 
                         // the shard has not been processed before, so start from the oldest record
                         Async.StartImmediate(fetchNextRecords (NoIteratorToken <| TrimHorizon), cts.Token)
                         initializedEvent.Trigger()
@@ -232,7 +227,7 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
                         // the shard has not been processed currently, start from the last checkpoint
                         Async.StartImmediate(fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum), cts.Token)
                         initializedEvent.Trigger()
-                    | Processing(workerId', seqNum) when workerId' = workerId -> 
+                    | Processing(workerId', seqNum) when workerId' = app.WorkerId -> 
                         // the shard was being processed by this worker, continue from where we left off
                         Async.StartImmediate(fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum), cts.Token)
                         initializedEvent.Trigger()
@@ -277,7 +272,7 @@ and ReactoKinesixApp (awsKey     : string,
                       streamName : string,
                       workerId   : string,
                       processor  : IRecordProcessor,
-                      ?config    : ReactoKinesixConfig) =
+                      ?config    : ReactoKinesixConfig) as this =
     // track a static dictionary of application names that are currenty running to prevent
     // consumer from accidentally starting multiple apps with same name
     static let runningApps = new ConcurrentDictionary<string, string>()        
@@ -323,7 +318,7 @@ and ReactoKinesixApp (awsKey     : string,
                 | StartWorker(shardId, reply) ->
                     match workers.TryGetValue(shardId) with
                     | true, worker -> reply.Reply()
-                    | _ -> let worker = new ReactoKinesix(kinesis, dynamoDB, config, tableName, streamName, workerId, shardId, processor)
+                    | _ -> let worker = new ReactoKinesix(this, shardId)
                            workers.Add(shardId, worker)
                            reply.Reply()
                 | StopWorker(shardId, reply) -> 
@@ -407,6 +402,14 @@ and ReactoKinesixApp (awsKey     : string,
             runningApps.TryRemove(appName) |> ignore
 
             logDebug "Disposed" [||]
+
+    member internal this.Kinesis    = kinesis
+    member internal this.DynamoDB   = dynamoDB
+    member internal this.Config     = config
+    member internal this.TableName  = tableName
+    member internal this.StreamName = streamName
+    member internal this.WorkerId   = workerId
+    member internal this.Processor  = processor
 
     member this.StartProcessing (shardId : string) = startWorker (ShardId shardId) |> Async.StartAsPlainTask
     member this.StopProcessing  (shardId : string) = stopWorker  (ShardId shardId) |> Async.StartAsPlainTask

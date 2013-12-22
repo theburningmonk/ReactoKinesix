@@ -189,7 +189,6 @@ module internal KinesisUtils =
                 | Success res -> 
                     logDebug "Received [{0}] records from stream [{1}], shard [{2}]"
                              [| res.Records.Count; streamName; shardId |]
-
                     return Success(res.NextShardIterator, res.Records :> Record seq)
                 | Failure exn ->
                     logError exn "Failed to get records from stream [{0}], shard [{1}]" [| streamName; shardId |]
