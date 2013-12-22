@@ -239,7 +239,7 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                         try
                             do! DynamoDBUtils.updateWorkerId app.WorkerId app.DynamoDB app.TableName workerId' shardId
 
-                            logDebug "Successfullly taken over responsibility for the shard" [||]
+                            logDebug "Successfully taken over responsibility for the shard" [||]
 
                             // the shard has not been processed currently, start from the last checkpoint
                             Async.Start(fetchNextRecords <| getIterator seqNum, cts.Token)
