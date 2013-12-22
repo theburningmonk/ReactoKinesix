@@ -79,8 +79,12 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
             let! res = DynamoDBUtils.updateIsClosed true app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
             match res with
             | Choice1Of2 ()  -> ()
-            | Choice2Of2 exn -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
-                                updateIsClosed()
+            | Choice2Of2 exn -> match exn with
+                                | :? ConditionalCheckFailedException ->  
+                                    conditionalCheckFailedEvent.Trigger()
+                                    dispose()
+                                | _ -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
+                                       updateIsClosed()
         }
         Async.Start(work, cts.Token)
 
@@ -233,7 +237,11 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                         // the shard was being processed by this worker, continue from where we left off
                         Async.StartImmediate(fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum), cts.Token)
                         initializedEvent.Trigger()
-                    | _ -> () // TODO : what to do here? Some other worker's working on this shard, so do we wait or die?
+                    | Processing(workerId', seqNum) ->
+                        // the shard is being processed by another worker, for now, give up
+                        logDebug "Shard is currently being processed by worker [{0}], last checkpoint [{1}], retiring." [| workerId'; seqNum |]
+                        let (ShardId shardId') = shardId
+                        app.StopProcessing(shardId') |> ignore
         }
 
     // keep retrying failed initializations until it succeeds
