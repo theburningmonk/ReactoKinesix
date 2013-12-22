@@ -217,7 +217,9 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                 | Failure exn -> initializationFailedEvent.Trigger(exn)
                 | Success status -> 
                     match status with
-                    | NotFound -> logWarn "Shard is not found. Please check if it was manually deleted from DynamoDB." [||]
+                    | NotFound -> 
+                        logWarn "Shard is not found. Please check if it was manually deleted from DynamoDB." [||]
+                        initializationFailedEvent.Trigger(ShardNotFoundException)
                     | Closed   -> shardClosedEvent.Trigger()
                     | New(workerId', _) when workerId' = app.WorkerId -> 
                         // the shard has not been processed before, so start from the oldest record
@@ -235,9 +237,9 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
         }
 
     // keep retrying failed initializations until it succeeds
-    let _ = initializationFailedEvent.Publish
-                .TakeUntil(initializedEvent.Publish)
-                .Subscribe(fun _ -> Async.Start(init, cts.Token))
+    let retryInitSub = initializationFailedEvent.Publish
+                        .TakeUntil(initializedEvent.Publish)
+                        .Subscribe(fun _ -> Async.Start(init, cts.Token))
 
     do Async.Start(init, cts.Token)
 
@@ -249,7 +251,8 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
             cts.Cancel()
 
             [| stopProcessingLogSub; heartbeatLogSub; heartbeatSub; checkpointLogSub; fetchSub;
-                receivedLogSub; processingLogSub; processingSub; processedLogSub; (cts :> IDisposable) |]
+                receivedLogSub; processingLogSub; processingSub; processedLogSub; retryInitSub;
+                (cts :> IDisposable) |]
             |> Array.iter (fun x -> x.Dispose())
 
             logDebug "Disposed." [||]
