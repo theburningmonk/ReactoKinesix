@@ -295,6 +295,7 @@ and ReactoKinesixApp (awsKey     : string,
     let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
     let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)    
     let streamName, workerId = StreamName streamName, WorkerId workerId
+    let mutable processor    = processor
 
     let initResult = DynamoDBUtils.initStateTable dynamoDB config appName |> Async.RunSynchronously
     let tableName  = match initResult with 
@@ -412,7 +413,8 @@ and ReactoKinesixApp (awsKey     : string,
     member internal this.Processor  = processor
 
     member this.StartProcessing (shardId : string) = startWorker (ShardId shardId) |> Async.StartAsPlainTask
-    member this.StopProcessing  (shardId : string) = stopWorker  (ShardId shardId) |> Async.StartAsPlainTask
+    member this.StopProcessing  (shardId : string) = stopWorker  (ShardId shardId) |> Async.StartAsPlainTask    
+    member this.ChangeProcessor newProcessor       = processor <- newProcessor
 
     interface IDisposable with
         member this.Dispose () = 
