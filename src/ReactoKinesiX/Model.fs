@@ -69,10 +69,20 @@ module internal InternalModel =
         | AtSequenceNumber      of SequenceNumber   // starting at the given sequence number
         | AfterSequenceNumber   of SequenceNumber   // starting immediate after the given sequence number        
         | Latest                                    // starting at the latest record
+        override this.ToString () = 
+            match this with
+            | TrimHorizon                -> "TrimHorizon"
+            | AtSequenceNumber seqNum    -> "At (" + seqNum.ToString() + ")"
+            | AfterSequenceNumber seqNum -> "After (" + seqNum.ToString() + ")"
+            | Latest                     -> "Latest"
 
     type Iterator       = 
         | IteratorToken         of string           // using the next iterator token from the previous call
         | NoIteratorToken       of IteratorType     // fetch a new iterator token
+        override this.ToString () =
+            match this with
+            | IteratorToken token       -> "IteratorToken(" + token + ")"
+            | NoIteratorToken iterType  -> iterType.ToString()
     
     type ShardStatus    = 
         | Removed       // the shard has been removed
