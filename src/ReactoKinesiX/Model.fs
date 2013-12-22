@@ -33,23 +33,25 @@ type ReactoKinesixConfig () =
     /// How frequenty should we check for shard merges/splits in the stream. Default is 1 minute.
     member val CheckStreamChangesFrequency  = TimeSpan.FromMinutes(1.0) with get, set
 
-/// Thrown when the configuration specifies a heartbeat frequence that's greater than the heartbeat timeout
-exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
+[<AutoOpen>]
+module Exceptions =
+    /// Thrown when the configuration specifies a heartbeat frequence that's greater than the heartbeat timeout
+    exception InvalidHeartbeatConfigurationException of TimeSpan * TimeSpan
 
-/// Thrown when the configruation for MaxDynamoDBRetries is negative
-exception NegativeMaxDynamoDBRetriesConfiguration of int
+    /// Thrown when the configruation for MaxDynamoDBRetries is negative
+    exception NegativeMaxDynamoDBRetriesConfigurationException of int
 
-/// Thrown when the configruation for MaxKinesisRetries is negative
-exception NegativeMaxKinesisRetriesConfiguration of int
+    /// Thrown when the configruation for MaxKinesisRetries is negative
+    exception NegativeMaxKinesisRetriesConfigurationException of int
 
-/// Thorwn when initialization of the app failed with the attached inner exception
-exception InitializationFailed of Exception
+    /// Thorwn when initialization of the app failed with the attached inner exception
+    exception InitializationFailedException of Exception
 
-/// Thrown when an app with the same name 
-exception AppNameIsAlreadyRunning of string
+    /// Thrown when an app with the same name 
+    exception AppNameIsAlreadyRunningException of string
 
-/// Thrown when trying to get records from a closed shard whose records have been exhausted
-exception ShardCannotBeIterated
+    /// Thrown when trying to get records from a closed shard whose records have been exhausted
+    exception ShardCannotBeIteratedException
 
 [<AutoOpen>]
 module internal InternalModel =

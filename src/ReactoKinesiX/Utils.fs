@@ -23,13 +23,13 @@ type Agent<'T> = MailboxProcessor<'T>
 module internal Utils =
     let validateConfig (config : ReactoKinesixConfig) =
         if config.HeartbeatTimeout < config.Heartbeat then
-            raise <| InvalidHeartbeatConfiguration(config.Heartbeat, config.HeartbeatTimeout)
+            raise <| InvalidHeartbeatConfigurationException(config.Heartbeat, config.HeartbeatTimeout)
 
         if config.MaxDynamoDBRetries < 0 then
-            raise <| NegativeMaxDynamoDBRetriesConfiguration(config.MaxDynamoDBRetries)
+            raise <| NegativeMaxDynamoDBRetriesConfigurationException(config.MaxDynamoDBRetries)
 
         if config.MaxKinesisRetries < 0 then
-            raise <| NegativeMaxKinesisRetriesConfiguration(config.MaxKinesisRetries)
+            raise <| NegativeMaxKinesisRetriesConfigurationException(config.MaxKinesisRetries)
 
     let logDebug (logger : ILog) format (args : obj[]) = if logger.IsDebugEnabled then logger.DebugFormat(format, args)
     let logInfo  (logger : ILog) format (args : obj[]) = if logger.IsInfoEnabled  then logger.InfoFormat(format, args)
@@ -174,7 +174,7 @@ module internal KinesisUtils =
                    iterator = 
         async {
             match iterator with
-            | EndOfShard -> return Failure(ShardCannotBeIterated)
+            | EndOfShard -> return Failure(ShardCannotBeIteratedException)
             | _ ->
                 let req = GetRecordsRequest()
 

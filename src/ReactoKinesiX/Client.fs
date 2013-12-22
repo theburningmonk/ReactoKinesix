@@ -131,7 +131,7 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
                     batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
                 | Failure(exn) -> 
                     match exn with
-                    | :? ShardCannotBeIterated -> shardClosedEvent.Trigger()
+                    | :? ShardCannotBeIteratedException -> shardClosedEvent.Trigger()
                     | _ -> do! fetchNextRecords iterator
         }
 
@@ -270,19 +270,19 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
         logWarn "Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead." [||]
         cleanup(false)
 
-type ReactoKinesixApp (awsKey     : string, 
-                       awsSecret  : string, 
-                       region     : RegionEndpoint,
-                       appName    : string,
-                       streamName : string,
-                       workerId   : string,
-                       processor  : IRecordProcessor,
-                       ?config    : ReactoKinesixConfig) =
+and ReactoKinesixApp (awsKey     : string, 
+                      awsSecret  : string, 
+                      region     : RegionEndpoint,
+                      appName    : string,
+                      streamName : string,
+                      workerId   : string,
+                      processor  : IRecordProcessor,
+                      ?config    : ReactoKinesixConfig) =
     // track a static dictionary of application names that are currenty running to prevent
     // consumer from accidentally starting multiple apps with same name
     static let runningApps = new ConcurrentDictionary<string, string>()        
     do if not <| runningApps.TryAdd(appName, streamName) 
-       then raise <| AppNameIsAlreadyRunning streamName
+       then raise <| AppNameIsAlreadyRunningException streamName
 
     let config = defaultArg config <| new ReactoKinesixConfig()
     do Utils.validateConfig config
@@ -304,7 +304,7 @@ type ReactoKinesixApp (awsKey     : string,
     let initResult = DynamoDBUtils.initStateTable dynamoDB config appName |> Async.RunSynchronously
     let tableName  = match initResult with 
                      | Success tableName -> tableName 
-                     | Failure(_, exn)   -> raise <| InitializationFailed exn
+                     | Failure(_, exn)   -> raise <| InitializationFailedException exn
 
     let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
                       .Subscribe(fun _ -> stateTableReadyEvent.Trigger(tableName.ToString())
