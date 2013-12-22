@@ -233,7 +233,7 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                     | Closed   -> shardClosedEvent.Trigger()
                     | NotProcessing(workerId', heartbeat, seqNum) -> 
                         logDebug "Taking over shard which was processed by worker [{0}], last heartbeat [{1}] and checkpoint [{2}]"
-                                 [| workerId', heartbeat, seqNum |]
+                                 [| workerId'; heartbeat; seqNum |]
 
                         // claim ownership of the shard by successfully updating the row
                         try
