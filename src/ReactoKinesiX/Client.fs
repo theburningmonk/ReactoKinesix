@@ -32,6 +32,7 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
     let loggerName  = sprintf "ReactorKinesixWorker[Stream:%O, Worker:%O, Shard:%O]" streamName workerId shardId
     let logger      = LogManager.GetLogger(loggerName)
     let logDebug    = logDebug logger
+    let logInfo     = logInfo  logger
     let logWarn     = logWarn  logger
     let logError    = logError logger
 
@@ -49,6 +50,8 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
     let checkpointEvent             = new Event<SequenceNumber>() // when the latest checkpoint is updated in state table
     let heartbeatEvent              = new Event<unit>()           // when a heartbeat is recorded
     let conditionalCheckFailedEvent = new Event<unit>()           // when a conditional check failure was encountered when writing to the state table
+
+    let shardClosedEvent            = new Event<unit>() // when the shard is closed and will not return any more data (i.e. NextShardIterator is null)
     
     let disposeInvoked = ref 0
     let dispose () = (this :> IDisposable).Dispose()
@@ -78,36 +81,58 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
         }
         Async.Start(work, cts.Token)
 
-    let rec updateCheckpoint seqNum =
+    let rec updateIsClosed () =
         let work = async {
-            let! res = DynamoDBUtils.updateCheckpoint seqNum dynamoDB tableName workerId shardId |> Async.Catch
+            let! res = DynamoDBUtils.updateIsClosed true dynamoDB tableName workerId shardId |> Async.Catch
             match res with
-            | Choice1Of2 () -> checkpointEvent.Trigger(seqNum)
-            | Choice2Of2 ex -> match ex with 
-                               | :? ConditionalCheckFailedException -> 
-                                    conditionalCheckFailedEvent.Trigger()
-                                    dispose()
-                               | exn -> 
-                                      // TODO : what's the right thing to do here if we failed to update checkpoint? 
-                                      // a) keep going and risk allowing more records to be processed multiple times
-                                      // b) crash and let the last batch of records be processed against
-                                      // c) wait and recurse until we succeed until some other worker takes over
-                                      //    processing of the shard in which case we get conditional check failed
-                                      // for now, try option c) with a 1 second delay as the risk of processing the same
-                                      // records can ony be determined by the consumer, perhaps expose some configurable
-                                      // behaviour under these circumstances?
-                                      logError exn "Failed to update checkpoint to [{0}]...retrying" [| seqNum |]
-                                      do! Async.Sleep(1000)
-                                      updateCheckpoint seqNum
+            | Choice1Of2 ()  -> ()
+            | Choice2Of2 exn -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
+                                updateIsClosed()
         }
         Async.Start(work, cts.Token)
 
-    let fetchNextRecords iterator = 
-        async {
-            logDebug "Fetching next records with iterator [{0}]" [| iterator |]
+    let rec updateCheckpoint seqNum = 
+        let work = 
+            async {
+                let! res = DynamoDBUtils.updateCheckpoint seqNum dynamoDB tableName workerId shardId |> Async.Catch
+                match res with
+                | Choice1Of2 () -> checkpointEvent.Trigger(seqNum)
+                | Choice2Of2 ex -> match ex with 
+                                   | :? ConditionalCheckFailedException -> 
+                                        conditionalCheckFailedEvent.Trigger()
+                                        dispose()
+                                   | exn -> 
+                                          // TODO : what's the right thing to do here if we failed to update checkpoint? 
+                                          // a) keep going and risk allowing more records to be processed multiple times
+                                          // b) crash and let the last batch of records be processed against
+                                          // c) wait and recurse until we succeed until some other worker takes over
+                                          //    processing of the shard in which case we get conditional check failed
+                                          // for now, try option c) with a 1 second delay as the risk of processing the same
+                                          // records can ony be determined by the consumer, perhaps expose some configurable
+                                          // behaviour under these circumstances?
+                                          logError exn "Failed to update checkpoint to [{0}]...retrying" [| seqNum |]
+                                          do! Async.Sleep(1000)
+                                          updateCheckpoint seqNum
+            }
+        Async.Start(work, cts.Token)
 
-            let! nextIterator, batch = KinesisUtils.getRecords kinesis streamName shardId iterator
-            batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
+    let rec fetchNextRecords iterator = 
+        async {
+            match iterator with
+            | EndOfShard -> shardClosedEvent.Trigger()
+            | _ -> 
+                logDebug "Fetching next records with iterator [{0}]" [| iterator |]
+
+                let! getRecordsResult = KinesisUtils.getRecords kinesis config streamName shardId iterator
+                match getRecordsResult with
+                | Success(nextIterator, batch) when nextIterator = null -> 
+                    batchReceivedEvent.Trigger(EndOfShard, batch)
+                | Success(nextIterator, batch) -> 
+                    batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
+                | Failure(exn) -> 
+                    match exn with
+                    | :? ShardCannotBeIterated -> shardClosedEvent.Trigger()
+                    | _ -> do! fetchNextRecords iterator
         }
 
     let processRecord record = 
@@ -120,7 +145,7 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
             processErroredEvent.Trigger(record, ex)
             Failure(SequenceNumber record.SequenceNumber, ex)
 
-    let stopProcessing       = conditionalCheckFailedEvent.Publish
+    let stopProcessing       = conditionalCheckFailedEvent.Publish                                
     let stopProcessingLogSub = stopProcessing.Subscribe(fun _ -> logDebug "Stop processing..." [||])
                          
     let heartbeat        = Observable.Interval(config.Heartbeat).TakeUntil(stopProcessing)
@@ -129,12 +154,15 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
 
     let checkpointLogSub = checkpointEvent.Publish.Subscribe(fun seqNum -> logDebug "Updating sequence number checkpoint [{0}]" [| seqNum |])
     
+    // signal to process the next batch of records that has been received
     let nextBatch       = initializedEvent.Publish                            
                             .Merge(Observable.Delay(emptyReceiveEvent.Publish, config.EmptyReceiveDelay))
                             .Merge(checkpointEvent.Publish.Select(fun _ -> ()))
 
-    let fetch           = batchProcessedEvent.Publish.TakeUntil(stopProcessing)
-    let fetchSub        = fetch.Subscribe(fun (_, iterator) -> fetchNextRecords iterator |> Async.StartImmediate)
+    // fetch new records after the previous batch has been processed until we need to either stop processing or the shard is closed
+    let stopFetching    = stopProcessing.Merge(shardClosedEvent.Publish)
+    let fetch           = batchProcessedEvent.Publish.TakeUntil(stopFetching)
+    let fetchSub        = fetch.Subscribe(fun (_, iterator) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
 
     let received        = batchReceivedEvent.Publish
     let receivedLogSub  = received.Subscribe(fun (iterator, records) -> 
@@ -176,7 +204,14 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
                             logDebug "Processed record [PartitionKey:{0}, SequenceNumber:{1}]"
                                      [| record.PartitionKey; record.SequenceNumber |])
 
-    // this is only initialization sequence
+    // only deal with the shard closed event the first time we see it
+    let _ = shardClosedEvent.Publish
+                .Take(1)
+                .Subscribe(fun _ ->
+                    logInfo "Shard is closed, no more records will be available." [||]                    
+                    updateIsClosed())
+
+    // this is the initialization sequence
     let init = 
         async {
             let! createShardResult = DynamoDBUtils.createShard dynamoDB tableName workerId shardId
@@ -188,17 +223,18 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
                 | Failure exn -> initializationFailedEvent.Trigger(exn)
                 | Success status -> 
                     match status with
+                    | Closed -> shardClosedEvent.Trigger()
                     | New(workerId', _) when workerId' = workerId -> 
                         // the shard has not been processed before, so start from the oldest record
-                        fetchNextRecords (NoIteratorToken <| TrimHorizon) |> Async.StartImmediate
+                        Async.StartImmediate(fetchNextRecords (NoIteratorToken <| TrimHorizon), cts.Token)
                         initializedEvent.Trigger()
                     | NotProcessing(_, _, seqNum) -> 
                         // the shard has not been processed currently, start from the last checkpoint
-                        fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                        Async.StartImmediate(fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum), cts.Token)
                         initializedEvent.Trigger()
                     | Processing(workerId', seqNum) when workerId' = workerId -> 
                         // the shard was being processed by this worker, continue from where we left off
-                        fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                        Async.StartImmediate(fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum), cts.Token)
                         initializedEvent.Trigger()
                     | _ -> () // TODO : what to do here? Some other worker's working on this shard, so do we wait or die?
         }
@@ -206,9 +242,9 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
     // keep retrying failed initializations until it succeeds
     let _ = initializationFailedEvent.Publish
                 .TakeUntil(initializedEvent.Publish)
-                .Subscribe(fun _ -> Async.Start init)
+                .Subscribe(fun _ -> Async.Start(init, cts.Token))
 
-    do Async.Start init
+    do Async.Start(init, cts.Token)
 
     let cleanup (disposing : bool) =
         // ensure that resources are only disposed of once
@@ -345,10 +381,10 @@ type ReactoKinesixApp (awsKey     : string,
                 logInfo "Stopping workers for [{0}] shards : [{1}]" logArgs
                 do! updateWorkers newShards stopWorker
        }
-    do Async.Start refresh
+    do Async.Start(refresh, cts.Token)
 
     let refreshSub = Observable.Interval(config.CheckStreamChangesFrequency)
-                        .Subscribe(fun _ -> Async.Start refresh)
+                        .Subscribe(fun _ -> Async.Start(refresh, cts.Token))
     
     let disposeInvoked = ref 0
     let cleanup (disposing : bool) =

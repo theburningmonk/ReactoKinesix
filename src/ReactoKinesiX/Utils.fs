@@ -28,6 +28,9 @@ module internal Utils =
         if config.MaxDynamoDBRetries < 0 then
             raise <| NegativeMaxDynamoDBRetriesConfiguration(config.MaxDynamoDBRetries)
 
+        if config.MaxKinesisRetries < 0 then
+            raise <| NegativeMaxKinesisRetriesConfiguration(config.MaxKinesisRetries)
+
     let logDebug (logger : ILog) format (args : obj[]) = if logger.IsDebugEnabled then logger.DebugFormat(format, args)
     let logInfo  (logger : ILog) format (args : obj[]) = if logger.IsInfoEnabled  then logger.InfoFormat(format, args)
     let logWarn  (logger : ILog) format (args : obj[]) = if logger.IsWarnEnabled  then logger.WarnFormat(format, args)    
@@ -119,6 +122,7 @@ module internal KinesisUtils =
 
     let private logger   = LogManager.GetLogger("KinesisUtils")
     let private logDebug = logDebug logger
+    let private logError = logError logger
     
     /// Returns the shards that are part of the stream
     let getShards (kinesis : IAmazonKinesis) (StreamName streamName) =
@@ -163,22 +167,33 @@ module internal KinesisUtils =
         }
 
     /// Returns a number of records from the shard in the stream along with the next shard iterator
-    let getRecords (kinesis : IAmazonKinesis) streamName shardId iterator = 
+    let getRecords (kinesis : IAmazonKinesis) 
+                   (config : ReactoKinesixConfig) 
+                   streamName 
+                   shardId
+                   iterator = 
         async {
-            let req = GetRecordsRequest()
-
             match iterator with
-            | IteratorToken(token) -> req.ShardIterator <- token
-            | NoIteratorToken(iteratorType)   ->
-                let! token = getShardIterator kinesis streamName shardId iteratorType
-                req.ShardIterator <- token
+            | EndOfShard -> return Failure(ShardCannotBeIterated)
+            | _ ->
+                let req = GetRecordsRequest()
 
-            let! res = kinesis.GetRecordsAsync(req)
+                match iterator with  
+                | IteratorToken(token) -> req.ShardIterator <- token
+                | NoIteratorToken(iteratorType) ->
+                    let! token = getShardIterator kinesis streamName shardId iteratorType
+                    req.ShardIterator <- token
 
-            logDebug "Received [{0}] records from stream [{1}], shard [{2}]"
-                     [| res.Records.Count; streamName; shardId |]
+                let! getRecordResult = Async.WithRetry(kinesis.GetRecordsAsync(req), config.MaxKinesisRetries)
+                match getRecordResult with
+                | Success res -> 
+                    logDebug "Received [{0}] records from stream [{1}], shard [{2}]"
+                             [| res.Records.Count; streamName; shardId |]
 
-            return res.NextShardIterator, res.Records :> Record seq
+                    return Success(res.NextShardIterator, res.Records :> Record seq)
+                | Failure exn ->
+                    logError exn "Failed to get records from stream [{0}], shard [{1}]" [| streamName; shardId |]
+                    return Failure(exn) 
         }
 
 module internal DynamoDBUtils =
@@ -190,8 +205,8 @@ module internal DynamoDBUtils =
         member this.PutItemAsync req        = Async.FromBeginEnd(req, this.BeginPutItem, this.EndPutItem)
         member this.UpdateItemAsync req     = Async.FromBeginEnd(req, this.BeginUpdateItem, this.EndUpdateItem)
 
-    let private shardIdAttr, lastHeartbeatAttr, workerIdAttr, checkpointAttr = 
-        "ShardId", "LastHeartbeat", "WorkerId", "SequenceNumberCheckpoint"
+    let private shardIdAttr, lastHeartbeatAttr, workerIdAttr, checkpointAttr, isClosedAttr = 
+        "ShardId", "LastHeartbeat", "WorkerId", "SequenceNumberCheckpoint", "IsClosed"
 
     let private logger   = LogManager.GetLogger("KinesisUtils")
     let private logDebug = logDebug logger
@@ -204,18 +219,23 @@ module internal DynamoDBUtils =
 
     let private tryGetAttributeValue (dict : IDictionary<_, AttributeValue>) key = 
         match dict.TryGetValue key with | true, x -> Some x.S | _ -> None
+    let private parseBool (str : string) = match bool.TryParse(str) with | true, x -> x | _ -> false
 
-    let private (|NoShard|Shard|) (res : GetItemResponse) =
+    let private (|NoShard|ClosedShard|Shard|) (res : GetItemResponse) =
         if res.Item.Count = 0 then NoShard
         else 
             // the shard creation should always ensure that worker ID and heartbeat is created
             // but the checkpoint is only set the first time we were able to get records from
             // the stream and processed them
-            let workerId, heartbeat, checkpoint = 
+            let workerId, heartbeat, checkpoint, isClosed = 
                 res.Item.[workerIdAttr].S,
                 res.Item.[lastHeartbeatAttr].S,
-                tryGetAttributeValue res.Item checkpointAttr
-            Shard(WorkerId workerId, fromHeartbeatTimestamp heartbeat, checkpoint)
+                tryGetAttributeValue res.Item checkpointAttr,
+                tryGetAttributeValue res.Item isClosedAttr
+
+            match isClosed with
+            | Some boolStr when parseBool boolStr -> ClosedShard
+            | _ -> Shard(WorkerId workerId, fromHeartbeatTimestamp heartbeat, checkpoint)
 
     /// Returns the list of tables that currently exist in DynamoDB
     let getTables (dynamoDB : IAmazonDynamoDB) =
@@ -317,7 +337,7 @@ module internal DynamoDBUtils =
         async {
             let req = new GetItemRequest(TableName = tableName, ConsistentRead = true)
             req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
-            req.AttributesToGet.AddRange([| workerIdAttr; checkpointAttr; lastHeartbeatAttr |])
+            req.AttributesToGet.AddRange([| workerIdAttr; checkpointAttr; lastHeartbeatAttr; isClosedAttr |])
 
             logDebug "Getting current status of shard [{1}] from state table [{0}]" [| tableName; shardId |]
 
@@ -329,7 +349,10 @@ module internal DynamoDBUtils =
                 match res with
                 | NoShard -> 
                     logDebug "Shard [{1}] not found in state tabe [{0}]" [| tableName; shardId |]
-                    return Success ShardStatus.Removed
+                    return Success ShardStatus.NotFound
+                | ClosedShard -> 
+                    logDebug "Shard [{0}] is closed" [| shardId |]
+                    return Success ShardStatus.Closed
                 | Shard(workerId, heartbeat, checkpoint) ->
                     let now = DateTime.UtcNow
 
@@ -356,6 +379,10 @@ module internal DynamoDBUtils =
         
             let expectedAttrVal = new ExpectedAttributeValue(Value = new AttributeValue(S = workerId), Exists = true)
             req.Expected.Add(workerIdAttr, expectedAttrVal)
+
+            // whilst updating the table, always update the heartbeat whilst we're at it
+            let newHeartbeatValue  = new AttributeValue(S = getHeartbeatTimestamp())
+            req.AttributeUpdates.Add(lastHeartbeatAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newHeartbeatValue))                
         
             update req
 
@@ -368,22 +395,23 @@ module internal DynamoDBUtils =
     /// Updates the heartbeat value for the specified shard conditionally against the worker ID so that
     /// if for some reason another worker has taken over this shard then we shall stop processing this shard
     let updateHeartbeat : IAmazonDynamoDB -> TableName -> WorkerId -> ShardId -> Async<unit> = 
-        let update (req : UpdateItemRequest) = 
-            let newAttrValue = new AttributeValue(S = getHeartbeatTimestamp())
-            req.AttributeUpdates.Add(lastHeartbeatAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newAttrValue))
-
-        updateShard update
+        updateShard (fun _ -> ())
 
     /// Updates the sequence number checkpoint for the specified shard conditionally against the worker
     /// ID so that if for some reason another worker has taken over this shard then we shall stop
     /// processing this shard
-    let updateCheckpoint (SequenceNumber seqNumber) =
+    let updateCheckpoint (SequenceNumber seqNumber) = 
         let update (req : UpdateItemRequest) = 
-            // whilst we're updating the checkpoint, might as well also update the heartbeat since it's
-            // essentially a free update (i.e. one request)
             let newCheckpointValue = new AttributeValue(S = seqNumber)
             req.AttributeUpdates.Add(checkpointAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newCheckpointValue))
-            let newHeartbeatValue  = new AttributeValue(S = getHeartbeatTimestamp())
-            req.AttributeUpdates.Add(lastHeartbeatAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newHeartbeatValue))
+                    
+        updateShard update
+
+    /// Updates the IsClosed flag for the specified shard conditionaly against the worker ID so that if 
+    /// for some reason another worker has taken over this shard then we shall stop processing this shard
+    let updateIsClosed (isClosed : bool) =
+        let update (req : UpdateItemRequest) = 
+            let newIsClosedValue = new AttributeValue(S = isClosed.ToString())
+            req.AttributeUpdates.Add(isClosedAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newIsClosedValue))
                         
         updateShard update

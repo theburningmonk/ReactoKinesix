@@ -27,6 +27,9 @@ type ReactoKinesixConfig () =
     /// Maximum number of retries on DynamoDB operations. Default is 3.
     member val MaxDynamoDBRetries      = 3 with get, set
 
+    /// Maximum number of retries on Kinesis operations. Default is 3.
+    member val MaxKinesisRetries       = 3 with get, set
+
     /// How frequenty should we check for shard merges/splits in the stream. Default is 1 minute.
     member val CheckStreamChangesFrequency  = TimeSpan.FromMinutes(1.0) with get, set
 
@@ -36,11 +39,17 @@ exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
 /// Thrown when the configruation for MaxDynamoDBRetries is negative
 exception NegativeMaxDynamoDBRetriesConfiguration of int
 
+/// Thrown when the configruation for MaxKinesisRetries is negative
+exception NegativeMaxKinesisRetriesConfiguration of int
+
 /// Thorwn when initialization of the app failed with the attached inner exception
 exception InitializationFailed of Exception
 
 /// Thrown when an app with the same name 
 exception AppNameIsAlreadyRunning of string
+
+/// Thrown when trying to get records from a closed shard whose records have been exhausted
+exception ShardCannotBeIterated
 
 [<AutoOpen>]
 module internal InternalModel =
@@ -79,13 +88,16 @@ module internal InternalModel =
     type Iterator       = 
         | IteratorToken         of string           // using the next iterator token from the previous call
         | NoIteratorToken       of IteratorType     // fetch a new iterator token
+        | EndOfShard                                // the shard is closed and no more iterator can be returned
         override this.ToString () =
             match this with
             | IteratorToken token       -> "IteratorToken(" + token + ")"
             | NoIteratorToken iterType  -> iterType.ToString()
+            | EndOfShard                -> "EndOfShard"
     
     type ShardStatus    = 
-        | Removed       // the shard has been removed
+        | NotFound      // the shard was not found
+        | Closed        // the shard was closed
         // the shard is new and has not been processed
         | New           of WorkerId * DateTime
         // the shard is there but not currently being processed
