@@ -22,8 +22,8 @@ open ReactoKinesix.Utils
 open log4net
 open log4net.Config
 
-let awsKey      = "AKIAJIQ27FQV7TT3NC6Q"
-let awsSecret   = "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"
+let awsKey      = "AWS-KEY"
+let awsSecret   = "AWS-SECRET"
 let region      = RegionEndpoint.USEast1
 let streamName  = "YC-test"
 
@@ -36,15 +36,18 @@ let putRecord (payload : string) =
     req.Data <- new MemoryStream(Encoding.UTF8.GetBytes(payload))
     kinesis.PutRecord(req) |> ignore
 
-let app = new ReactoKinesixApp(awsKey, awsSecret,region, "YC-test", streamName)
-
-//{ 1..100 } |> Seq.iter (fun i -> putRecord <| i.ToString())
-
-let action (record : Record) =
+let act (record : Record) =
     use streamReader = new StreamReader(record.Data)
     printfn "\n\n\n\n\n\n\n\n\n\n%s : %s\n\n\n\n\n\n\n\n\n\n" record.SequenceNumber <| streamReader.ReadToEnd()
 
-let workers = app.Start("PHANTOM", Action<Record>(action))
-workers.Result.Dispose()
+let processor = { new IRecordProcessor with member this.Process record = act record }
+
+let app = new ReactoKinesixApp(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM", processor )
+
+app.StartProcessing("shardId-000000000000")
+app.StopProcessing("shardId-000000000000")
+
+//{ 1..100 } |> Seq.iter (fun i -> putRecord <| i.ToString())
 
 (app :> IDisposable).Dispose()
+

@@ -30,6 +30,9 @@ type ReactoKinesixConfig () =
 /// Thrown when the configuration specifies a heartbeat frequence that's greater than the heartbeat timeout
 exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
 
+/// Thrown when the configruation for MaxDynamoDBRetries is negative
+exception NegativeMaxDynamoDBRetriesConfiguration of int
+
 /// Thorwn when initialization of the app failed with the attached inner exception
 exception InitializationFailed of Exception
 
@@ -82,3 +85,7 @@ module internal InternalModel =
         | Failure   of 'Failure
 
     type ProcessResult  = Result<SequenceNumber, SequenceNumber * Exception>
+
+    type ControlMessage =
+        | StartWorker   of ShardId * AsyncReplyChannel<unit>
+        | StopWorker    of ShardId * AsyncReplyChannel<unit>

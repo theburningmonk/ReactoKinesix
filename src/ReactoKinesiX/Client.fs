@@ -2,6 +2,7 @@
 
 open System
 open System.Collections.Concurrent
+open System.Collections.Generic
 open System.Reactive
 open System.Reactive.Linq
 open System.Threading
@@ -17,14 +18,17 @@ open Amazon.Kinesis.Model
 open ReactoKinesix.Model
 open ReactoKinesix.Utils
 
-type private ReactoKinesix (kinesis    : IAmazonKinesis,
-                            dynamoDB   : IAmazonDynamoDB,
-                            config     : ReactoKinesixConfig,
-                            tableName  : TableName, 
-                            streamName : StreamName,
-                            workerId   : WorkerId,
-                            shardId    : ShardId,
-                            action     : Record -> unit) as this =
+type IRecordProcessor = 
+    abstract member Process : Record -> unit
+
+type internal ReactoKinesix (kinesis    : IAmazonKinesis,
+                             dynamoDB   : IAmazonDynamoDB,
+                             config     : ReactoKinesixConfig,
+                             tableName  : TableName, 
+                             streamName : StreamName,
+                             workerId   : WorkerId,
+                             shardId    : ShardId,
+                             processor  : IRecordProcessor) as this =
     let loggerName  = sprintf "ReactorKinesisWorker[Stream:%O, Worker:%O, Shard:%O]" streamName workerId shardId
     let logger      = LogManager.GetLogger(loggerName)
     let logDebug    = logDebug logger
@@ -33,17 +37,19 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
 
     do logDebug "Starting worker..." [||]
 
-    let batchReceivedEvent          = new Event<Iterator * Record seq>()
-    let recordProcessedEvent        = new Event<Record>()
-    let processErroredEvent         = new Event<Record * Exception>()
-    let batchProcessedEvent         = new Event<int * Iterator>()
+    let batchReceivedEvent          = new Event<Iterator * Record seq>() // when a new batch of records have been received
+    let recordProcessedEvent        = new Event<Record>()                // when a record has been processed by processor
+    let processErroredEvent         = new Event<Record * Exception>()    // when an error was caught when processing a record
+    let batchProcessedEvent         = new Event<int * Iterator>()        // when a batch has finished processing with the iterator for next batch
 
-    let startedEvent                = new Event<unit>()
-    let emptyReceiveEvent           = new Event<unit>()
-    let checkpointEvent             = new Event<SequenceNumber>()
-    let heartbeatEvent              = new Event<unit>()
-    let conditionalCheckFailedEvent = new Event<unit>()
-
+    let initializedEvent            = new Event<unit>()           // when the worker has been initialized
+    let initializationFailedEvent   = new Event<Exception>()      // when an error was caught whist initializing the worker
+    
+    let emptyReceiveEvent           = new Event<unit>()           // the worker received no records from the stream
+    let checkpointEvent             = new Event<SequenceNumber>() // when the latest checkpoint is updated in state table
+    let heartbeatEvent              = new Event<unit>()           // when a heartbeat is recorded
+    let conditionalCheckFailedEvent = new Event<unit>()           // when a conditional check failure was encountered when writing to the state table
+    
     let disposeInvoked = ref 0
     let dispose () = (this :> IDisposable).Dispose()
 
@@ -106,7 +112,7 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
 
     let processRecord record = 
         try 
-            action(record)
+            processor.Process(record)
             recordProcessedEvent.Trigger(record)
             Success(SequenceNumber record.SequenceNumber)
         with
@@ -123,12 +129,11 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
 
     let checkpointLogSub = checkpointEvent.Publish.Subscribe(fun seqNum -> logDebug "Updating sequence number checkpoint [{0}]" [| seqNum |])
     
-    let nextBatch       = startedEvent.Publish                            
+    let nextBatch       = initializedEvent.Publish                            
                             .Merge(Observable.Delay(emptyReceiveEvent.Publish, config.EmptyReceiveDelay))
                             .Merge(checkpointEvent.Publish.Select(fun _ -> ()))
 
-    let fetch           = batchProcessedEvent.Publish
-                            .TakeUntil(stopProcessing)
+    let fetch           = batchProcessedEvent.Publish.TakeUntil(stopProcessing)
     let fetchSub        = fetch.Subscribe(fun (_, iterator) -> fetchNextRecords iterator |> Async.StartImmediate)
 
     let received        = batchReceivedEvent.Publish
@@ -171,124 +176,171 @@ type private ReactoKinesix (kinesis    : IAmazonKinesis,
                             logDebug "Processed record [PartitionKey:{0}, SequenceNumber:{1}]"
                                      [| record.PartitionKey; record.SequenceNumber |])
 
-    let initSub = Observable
-                    .FromAsync(DynamoDBUtils.getShardStatus dynamoDB config tableName shardId)
-                    .Subscribe(function 
-                        | Failure exn -> 
-                            logError exn "" [||]
-                            dispose()
-                        | Success res -> 
-                            match res with
-                            | New(workerId', _) when workerId' = workerId -> 
-                                // the shard has not been processed before, so start from the oldest record
-                                fetchNextRecords (NoIteratorToken <| TrimHorizon) |> Async.StartImmediate
-                                startedEvent.Trigger()
-                            | NotProcessing(_, _, seqNum) -> 
-                                // the shard has not been processed currently, start from the last checkpoint
-                                fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
-                                startedEvent.Trigger()
-                            | Processing(workerId', seqNum) when workerId' = workerId -> 
-                                // the shard was being processed by this worker, continue from where we left off
-                                fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
-                                startedEvent.Trigger()
-                            | _ -> ())
+    // this is only initialization sequence
+    let init = 
+        async {
+            let! createShardResult = DynamoDBUtils.createShard dynamoDB tableName workerId shardId
+            match createShardResult with
+            | Failure exn -> initializationFailedEvent.Trigger(exn)
+            | Success _   -> 
+                let! getShardStatusResult = DynamoDBUtils.getShardStatus dynamoDB config tableName shardId
+                match getShardStatusResult with
+                | Failure exn -> initializationFailedEvent.Trigger(exn)
+                | Success status -> 
+                    match status with
+                    | New(workerId', _) when workerId' = workerId -> 
+                        // the shard has not been processed before, so start from the oldest record
+                        fetchNextRecords (NoIteratorToken <| TrimHorizon) |> Async.StartImmediate
+                        initializedEvent.Trigger()
+                    | NotProcessing(_, _, seqNum) -> 
+                        // the shard has not been processed currently, start from the last checkpoint
+                        fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                        initializedEvent.Trigger()
+                    | Processing(workerId', seqNum) when workerId' = workerId -> 
+                        // the shard was being processed by this worker, continue from where we left off
+                        fetchNextRecords (NoIteratorToken <| AfterSequenceNumber seqNum) |> Async.StartImmediate
+                        initializedEvent.Trigger()
+                    | _ -> () // TODO : what to do here? Some other worker's working on this shard, so do we wait or die?
+        }
 
-    [<CLIEvent>] member this.OnBatchReceived            = batchReceivedEvent.Publish
-    [<CLIEvent>] member this.OnRecordProcessed          = recordProcessedEvent.Publish
-    [<CLIEvent>] member this.OnProcessErrored           = processErroredEvent.Publish
-    [<CLIEvent>] member this.OnBatchProcessed           = batchProcessedEvent.Publish
-    [<CLIEvent>] member this.OnEmptyReceive             = emptyReceiveEvent.Publish
-    [<CLIEvent>] member this.OnCheckpoint               = checkpointEvent.Publish
-    [<CLIEvent>] member this.OnHeartbeat                = heartbeatEvent.Publish
-    [<CLIEvent>] member this.OnConditionalCheckFailed   = conditionalCheckFailedEvent.Publish
+    // keep retrying failed initializations until it succeeds
+    let _ = initializationFailedEvent.Publish
+                .TakeUntil(initializedEvent.Publish)
+                .Subscribe(fun _ -> Async.Start init)
+
+    do Async.Start init
+
+    let cleanup (disposing : bool) =
+        // ensure that resources are only disposed of once
+        if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
+            logDebug "Disposing..." [||]
+
+            cts.Cancel()
+
+            [| stopProcessingLogSub; heartbeatLogSub; heartbeatSub; checkpointLogSub; fetchSub;
+                receivedLogSub; processingLogSub; processingSub; processedLogSub; (cts :> IDisposable) |]
+            |> Array.iter (fun x -> x.Dispose())
+
+            logDebug "Disposed." [||]
 
     interface IDisposable with
         member this.Dispose () = 
-            if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
-                logDebug "Disposing..." [||]
+            GC.SuppressFinalize(this)
+            cleanup(true)
 
-                cts.Cancel()
-
-                [| stopProcessingLogSub; heartbeatLogSub; heartbeatSub; checkpointLogSub; fetchSub;
-                   receivedLogSub; processingLogSub; processingSub; processedLogSub; initSub; 
-                   (cts :> IDisposable) |]
-                |> Array.iter (fun x -> x.Dispose())
-
-                logDebug "Disposed." [||]
+    // provide a finalizer so that in the case the consumer forgets to dispose of the worker the
+    // finalizer will clean up
+    override this.Finalize () =
+        logWarn "Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead." [||]
+        cleanup(false)
 
 type ReactoKinesixApp (awsKey     : string, 
                        awsSecret  : string, 
                        region     : RegionEndpoint,
                        appName    : string,
                        streamName : string,
+                       workerId   : string,
+                       processor  : IRecordProcessor,
                        ?config    : ReactoKinesixConfig) =
-    static let runningApps = new ConcurrentDictionary<string, string>()
-    
-    let config = defaultArg config <| new ReactoKinesixConfig()
-    do Utils.validateConfig config
-
+    // track a static dictionary of application names that are currenty running to prevent
+    // consumer from accidentally starting multiple apps with same name
+    static let runningApps = new ConcurrentDictionary<string, string>()        
     do if not <| runningApps.TryAdd(appName, streamName) 
        then raise <| AppNameIsAlreadyRunning streamName
+
+    let config = defaultArg config <| new ReactoKinesixConfig()
+    do Utils.validateConfig config
 
     let loggerName = sprintf "ReactoKinesixApp[AppName:%s, Stream:%O]" appName streamName
     let logger     = LogManager.GetLogger(loggerName)
     let logDebug   = logDebug logger
     let logWarn    = logWarn  logger
 
-    let disposeInvoked = ref 0
+    let cts = new CancellationTokenSource()
 
     let stateTableReadyEvent = new Event<string>()
 
     let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
-    let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region) 
-    
-    let streamName = StreamName streamName
+    let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)    
+    let streamName, workerId = StreamName streamName, WorkerId workerId
 
     let initResult = DynamoDBUtils.initStateTable dynamoDB config appName |> Async.RunSynchronously
     let tableName  = match initResult with 
                      | Success tableName -> tableName 
                      | Failure(_, exn)   -> raise <| InitializationFailed exn
 
-    let tableReady = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
+    let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
+                      .Subscribe(fun _ -> stateTableReadyEvent.Trigger(tableName.ToString())
+                                          logDebug "State table [{0}] is ready" [| tableName |])
 
-    // app is initialized when the app's state table is fully created
-    let initializedLogSub = tableReady.Subscribe(fun _ -> logDebug "State table [{0}] is ready" [| tableName |])
-    let initializedSub    = tableReady.Subscribe(fun _ -> stateTableReadyEvent.Trigger(tableName.ToString()))
-
-    let start workerId action =
-        let workerId  = WorkerId workerId
-
+    // this is a mutable dictionary of workers but can only be mutated from within the controller agent
+    // which is single threaded by nature so there's no need for placing locks around add/remove operations
+    let workers = new Dictionary<ShardId, ReactoKinesix>()
+    let body (inbox : Agent<ControlMessage>) = 
         async {
-            let! shards = KinesisUtils.getShards kinesis streamName
-            let! createdShards = 
-                shards
-                |> Seq.map (fun shard -> 
-                    async { 
-                        let! res = DynamoDBUtils.createShard dynamoDB tableName workerId (ShardId shard.ShardId)
-                        match res with 
-                        | Success _   -> ()
-                        | Failure exn -> logWarn "Failed to create entry for shard [{0}] in the state table.. continuing anyway.." [| shard.ShardId |]
+            while true do
+                let! msg = inbox.Receive()
 
-                        return shard
-                    })
-                |> Async.Parallel
-
-            let workers = createdShards |> Array.map (fun shard -> new ReactoKinesix(kinesis, dynamoDB, config, tableName, streamName, workerId, ShardId shard.ShardId, action))
-
-            return { new IDisposable with member this.Dispose () = workers |> Array.iter (fun p -> (p :> IDisposable).Dispose()) }
+                match msg with
+                | StartWorker(shardId, reply) ->
+                    match workers.TryGetValue(shardId) with
+                    | true, worker -> reply.Reply()
+                    | _ -> let worker = new ReactoKinesix(kinesis, dynamoDB, config, tableName, streamName, workerId, shardId, processor)
+                           workers.Add(shardId, worker)
+                           reply.Reply()
+                | StopWorker(shardId, reply) -> 
+                    match workers.TryGetValue(shardId) with
+                    | true, worker -> 
+                        (worker :> IDisposable).Dispose()
+                        workers.Remove(shardId) |> ignore
+                        reply.Reply()                        
+                    | _ -> reply.Reply()
         }
-        |> Async.StartAsTask
+    let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn "Controller agent was restarted due to exception :\n {0}" [| exn |])
 
-    [<CLIEvent>] member this.OnStateTableReady = stateTableReadyEvent.Publish
+    let startWorker shardId = controller.PostAndAsyncReply(fun reply -> StartWorker(shardId, reply))
+    let stopWorker  shardId = controller.PostAndAsyncReply(fun reply -> StopWorker(shardId, reply))
 
-    member this.Start(workerId : string, action : Action<Record>) = start workerId action.Invoke
+    do async {
+        let! shards = KinesisUtils.getShards kinesis streamName
+
+        logDebug "Starting workers for [{0}] shards : [{1}]" 
+                 [| shards.Count; shards |> Seq.map (fun shard -> shard.ShardId) |> (fun ids -> String.Join(",", ids)) |]
+
+        do! shards 
+            |> Seq.map (fun shard -> startWorker (ShardId shard.ShardId))
+            |> Async.Parallel
+            |> Async.Ignore
+       }
+       |> Async.Start
+    
+    let disposeInvoked = ref 0
+    let cleanup (disposing : bool) =
+        // ensure that resources are only disposed of once
+        if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
+            logDebug "Disposing..." [||]
+
+            workers.Keys 
+            |> Seq.toArray 
+            |> Seq.map (fun shardId -> stopWorker shardId)
+            |> Async.Parallel
+            |> Async.Ignore
+            |> Async.RunSynchronously
+
+            cts.Cancel()
+            cts.Dispose()
+            logDebug "Disposed" [||]
+
+    member this.StartProcessing (shardId : string) = startWorker (ShardId shardId) |> Async.StartAsPlainTask
+    member this.StopProcessing  (shardId : string) = stopWorker  (ShardId shardId) |> Async.StartAsPlainTask
 
     interface IDisposable with
         member this.Dispose () = 
-            if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
-                logDebug "Disposing..." [||]
+            GC.SuppressFinalize(this)
+            cleanup(true)
 
-                initializedLogSub.Dispose()
-                initializedSub.Dispose()
-
-                logDebug "Disposed" [||]
+    // provide a finalizer so that in the case the consumer forgets to dispose of the app the
+    // finalizer will clean up
+    override this.Finalize () =
+        logWarn "Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead." [||]
+        cleanup(false)

@@ -4,6 +4,8 @@ open System
 open System.Collections.Generic
 open System.Globalization
 open System.Reactive.Linq
+open System.Threading
+open System.Threading.Tasks
 
 open log4net
 
@@ -14,11 +16,17 @@ open Amazon.Kinesis.Model
 
 open ReactoKinesix.Model
 
+/// Type alias for F# mailbox processor type
+type Agent<'T> = MailboxProcessor<'T>
+
 [<AutoOpen>]
 module internal Utils =
     let validateConfig (config : ReactoKinesixConfig) =
         if config.HeartbeatTimeout < config.Heartbeat then
             raise <| InvalidHeartbeatConfiguration(config.Heartbeat, config.HeartbeatTimeout)
+
+        if config.MaxDynamoDBRetries < 0 then
+            raise <| NegativeMaxDynamoDBRetriesConfiguration(config.MaxDynamoDBRetries)
 
     let logDebug (logger : ILog) format (args : obj[]) = if logger.IsDebugEnabled then logger.DebugFormat(format, args)
     let logInfo  (logger : ILog) format (args : obj[]) = if logger.IsInfoEnabled  then logger.InfoFormat(format, args)
@@ -83,6 +91,25 @@ module internal Utils =
                     | Choice2Of2 exn -> return Failure exn
                 }
             loop 0
+
+        /// Starts a computation as a plain task.
+        static member StartAsPlainTask (work : Async<unit>) = 
+            Task.Factory.StartNew(fun () -> work |> Async.RunSynchronously)
+
+    type MailboxProcessor<'T> with
+        /// Start an agent and protect it from unhandled exceptions
+        static member StartProtected (body : MailboxProcessor<_> -> Async<unit>, 
+                                      ?cancellationToken : CancellationToken,
+                                      ?onRestart : Exception -> unit) = 
+            let onRestart = defaultArg onRestart (fun _ -> ())
+            let watchdog f x = async {
+                while true do
+                    try
+                        do! f x
+                    with exn -> onRestart(exn)
+            }
+
+            Agent.Start((fun inbox -> watchdog body inbox), ?cancellationToken = cancellationToken)
 
 module internal KinesisUtils =
     type IAmazonKinesis with
