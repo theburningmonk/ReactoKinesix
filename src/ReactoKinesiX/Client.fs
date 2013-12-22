@@ -29,7 +29,7 @@ type internal ReactoKinesix (kinesis    : IAmazonKinesis,
                              workerId   : WorkerId,
                              shardId    : ShardId,
                              processor  : IRecordProcessor) as this =
-    let loggerName  = sprintf "ReactorKinesisWorker[Stream:%O, Worker:%O, Shard:%O]" streamName workerId shardId
+    let loggerName  = sprintf "ReactorKinesixWorker[Stream:%O, Worker:%O, Shard:%O]" streamName workerId shardId
     let logger      = LogManager.GetLogger(loggerName)
     let logDebug    = logDebug logger
     let logWarn     = logWarn  logger
@@ -254,6 +254,7 @@ type ReactoKinesixApp (awsKey     : string,
     let loggerName = sprintf "ReactoKinesixApp[AppName:%s, Stream:%O]" appName streamName
     let logger     = LogManager.GetLogger(loggerName)
     let logDebug   = logDebug logger
+    let logInfo    = logInfo  logger
     let logWarn    = logWarn  logger
 
     let cts = new CancellationTokenSource()
@@ -275,6 +276,7 @@ type ReactoKinesixApp (awsKey     : string,
 
     // this is a mutable dictionary of workers but can only be mutated from within the controller agent
     // which is single threaded by nature so there's no need for placing locks around add/remove operations
+    let knownShards = new HashSet<ShardId>()
     let workers = new Dictionary<ShardId, ReactoKinesix>()
     let body (inbox : Agent<ControlMessage>) = 
         async {
@@ -295,30 +297,66 @@ type ReactoKinesixApp (awsKey     : string,
                         workers.Remove(shardId) |> ignore
                         reply.Reply()                        
                     | _ -> reply.Reply()
+                | AddKnownShard(shardId, reply) ->
+                    knownShards.Add(shardId) |> ignore
+                    reply.Reply()
+                | RemoveKnownShard(shardId, reply) ->
+                    knownShards.Remove(shardId) |> ignore
+                    reply.Reply()
         }
     let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn "Controller agent was restarted due to exception :\n {0}" [| exn |])
 
-    let startWorker shardId = controller.PostAndAsyncReply(fun reply -> StartWorker(shardId, reply))
-    let stopWorker  shardId = controller.PostAndAsyncReply(fun reply -> StopWorker(shardId, reply))
+    let startWorker shardId   = controller.PostAndAsyncReply(fun reply -> StartWorker(shardId, reply))
+    let stopWorker  shardId   = controller.PostAndAsyncReply(fun reply -> StopWorker(shardId, reply))
+    let addKnownShard shardId = controller.PostAndAsyncReply(fun reply -> AddKnownShard(shardId, reply))
+    let rmvKnownShard shardId = controller.PostAndAsyncReply(fun reply -> RemoveKnownShard(shardId, reply))
 
-    do async {
-        let! shards = KinesisUtils.getShards kinesis streamName
+    let updateWorkers (shardIds : string seq) (update : ShardId -> Async<unit>) = 
+        async {
+            do! shardIds                
+                |> Seq.map (fun shardId -> update (ShardId shardId))
+                |> Async.Parallel
+                |> Async.Ignore
+        }
 
-        logDebug "Starting workers for [{0}] shards : [{1}]" 
-                 [| shards.Count; shards |> Seq.map (fun shard -> shard.ShardId) |> (fun ids -> String.Join(",", ids)) |]
+    let refresh =
+        async {
+            // find difference between the shards in the stream and the shards we're currenty processing
+            let! shards  = KinesisUtils.getShards kinesis streamName
+            let shardIds = shards |> Seq.map (fun shard -> shard.ShardId) |> Set.ofSeq
 
-        do! shards 
-            |> Seq.map (fun shard -> startWorker (ShardId shard.ShardId))
-            |> Async.Parallel
-            |> Async.Ignore
+            let knownShards = knownShards |> Seq.map (fun (ShardId shardId) -> shardId) |> Set.ofSeq
+            let newShards     = Set.difference shardIds knownShards
+            let removedShards = Set.difference knownShards shardIds
+
+            if newShards.Count > 0 then
+                let logArgs : obj[] = [| newShards.Count; String.Join(",", newShards) |]
+                logInfo "Add [{0}] shards to known shards : [{1}]" logArgs
+                do! updateWorkers newShards addKnownShard
+
+                logInfo "Starting workers for [{0}] shards : [{1}]" logArgs
+                do! updateWorkers newShards startWorker
+
+            if removedShards.Count > 0 then
+                let logArgs : obj[] = [| removedShards.Count; String.Join(",", removedShards) |]
+                logInfo "Remove [{0}] shards from known shards : [{1}]" logArgs
+                do! updateWorkers newShards rmvKnownShard
+
+                logInfo "Stopping workers for [{0}] shards : [{1}]" logArgs
+                do! updateWorkers newShards stopWorker
        }
-       |> Async.Start
+    do Async.Start refresh
+
+    let refreshSub = Observable.Interval(config.CheckStreamChangesFrequency)
+                        .Subscribe(fun _ -> Async.Start refresh)
     
     let disposeInvoked = ref 0
     let cleanup (disposing : bool) =
         // ensure that resources are only disposed of once
         if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
             logDebug "Disposing..." [||]
+
+            refreshSub.Dispose()
 
             workers.Keys 
             |> Seq.toArray 
@@ -329,6 +367,9 @@ type ReactoKinesixApp (awsKey     : string,
 
             cts.Cancel()
             cts.Dispose()
+
+            runningApps.TryRemove(appName) |> ignore
+
             logDebug "Disposed" [||]
 
     member this.StartProcessing (shardId : string) = startWorker (ShardId shardId) |> Async.StartAsPlainTask

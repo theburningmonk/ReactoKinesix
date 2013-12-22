@@ -27,6 +27,9 @@ type ReactoKinesixConfig () =
     /// Maximum number of retries on DynamoDB operations. Default is 3.
     member val MaxDynamoDBRetries      = 3 with get, set
 
+    /// How frequenty should we check for shard merges/splits in the stream. Default is 1 minute.
+    member val CheckStreamChangesFrequency  = TimeSpan.FromMinutes(1.0) with get, set
+
 /// Thrown when the configuration specifies a heartbeat frequence that's greater than the heartbeat timeout
 exception InvalidHeartbeatConfiguration of TimeSpan * TimeSpan
 
@@ -87,5 +90,7 @@ module internal InternalModel =
     type ProcessResult  = Result<SequenceNumber, SequenceNumber * Exception>
 
     type ControlMessage =
-        | StartWorker   of ShardId * AsyncReplyChannel<unit>
-        | StopWorker    of ShardId * AsyncReplyChannel<unit>
+        | StartWorker      of ShardId * AsyncReplyChannel<unit>
+        | StopWorker       of ShardId * AsyncReplyChannel<unit>
+        | AddKnownShard    of ShardId * AsyncReplyChannel<unit>
+        | RemoveKnownShard of ShardId * AsyncReplyChannel<unit>
