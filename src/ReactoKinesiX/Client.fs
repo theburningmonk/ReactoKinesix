@@ -6,6 +6,7 @@ open System.Collections.Generic
 open System.Reactive
 open System.Reactive.Linq
 open System.Threading
+open System.Threading.Tasks
 
 open log4net
 
@@ -20,6 +21,13 @@ open ReactoKinesix.Utils
 
 type IRecordProcessor = 
     abstract member Process : Record -> unit
+
+type IReactoKinesixApp =
+    inherit IDisposable
+
+    abstract member StartProcessing : shardId : string -> Task
+    abstract member StopProcessing  : shardId : string -> Task
+    abstract member ChangeProcessor : newProcessor : IRecordProcessor -> unit
 
 type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this =
     let loggerName  = sprintf "ReactorKinesixWorker[Stream:%O, Worker:%O, Shard:%O]" app.StreamName app.WorkerId shardId
@@ -260,7 +268,7 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                         // the shard is being processed by another worker, for now, give up
                         logDebug "Shard is currently being processed by worker [{0}], last checkpoint [{1}], retiring." [| workerId'; seqNum |]
                         let (ShardId shardId') = shardId
-                        app.StopProcessing(shardId') |> ignore
+                        (app :> IReactoKinesixApp).StopProcessing(shardId') |> ignore
         }
 
     // keep retrying failed initializations until it succeeds
@@ -294,21 +302,20 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
         logWarn "Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead." [||]
         cleanup(false)
 
-and ReactoKinesixApp (awsKey     : string, 
-                      awsSecret  : string, 
-                      region     : RegionEndpoint,
-                      appName    : string,
-                      streamName : string,
-                      workerId   : string,
-                      processor  : IRecordProcessor,
-                      ?config    : ReactoKinesixConfig) as this =
+and ReactoKinesixApp private (awsKey     : string, 
+                              awsSecret  : string, 
+                              region     : RegionEndpoint,
+                              appName    : string,
+                              streamName : string,
+                              workerId   : string,
+                              processor  : IRecordProcessor,
+                              config     : ReactoKinesixConfig) as this =
     // track a static dictionary of application names that are currenty running to prevent
     // consumer from accidentally starting multiple apps with same name
     static let runningApps = new ConcurrentDictionary<string, string>()        
     do if not <| runningApps.TryAdd(appName, streamName) 
        then raise <| AppNameIsAlreadyRunningException streamName
-
-    let config = defaultArg config <| new ReactoKinesixConfig()
+    
     do Utils.validateConfig config
 
     let loggerName = sprintf "ReactoKinesixApp[AppName:%s, Stream:%O]" appName streamName
@@ -431,9 +438,14 @@ and ReactoKinesixApp (awsKey     : string,
     member internal this.WorkerId   = workerId
     member internal this.Processor  = processor
 
-    member this.StartProcessing (shardId : string) = startWorker (ShardId shardId) |> Async.StartAsPlainTask
-    member this.StopProcessing  (shardId : string) = stopWorker  (ShardId shardId) |> Async.StartAsPlainTask    
-    member this.ChangeProcessor newProcessor       = processor <- newProcessor
+    static member CreateNew(awsKey, awsSecret, region, appName, streamName, workerId, processor, ?config) =
+        let config = defaultArg config <| new ReactoKinesixConfig()
+        new ReactoKinesixApp(awsKey, awsSecret, region, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
+
+    interface IReactoKinesixApp with
+        member this.StartProcessing (shardId : string) = startWorker (ShardId shardId) |> Async.StartAsPlainTask
+        member this.StopProcessing  (shardId : string) = stopWorker  (ShardId shardId) |> Async.StartAsPlainTask    
+        member this.ChangeProcessor newProcessor       = processor <- newProcessor
 
     interface IDisposable with
         member this.Dispose () = 

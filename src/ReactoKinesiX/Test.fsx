@@ -59,7 +59,7 @@ let act2 (record : Record) =
 let processor = { new IRecordProcessor with member this.Process record = act record }
 let processor2 = { new IRecordProcessor with member this.Process record = act2 record }
 
-let app = new ReactoKinesixApp(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM", processor)
+let app = ReactoKinesixApp.CreateNew(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM", processor)
 
 app.StartProcessing("shardId-000000000002")
 app.StopProcessing("shardId-000000000002")
