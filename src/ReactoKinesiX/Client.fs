@@ -324,16 +324,14 @@ and ReactoKinesixApp (awsKey     : string,
     let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
     let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)    
     let streamName, workerId = StreamName streamName, WorkerId workerId
+    let tableName            = TableName <| sprintf "%s%s" appName config.DynamoDBTableSuffix
     let mutable processor    = processor
 
-    let initResult = DynamoDBUtils.initStateTable dynamoDB config appName |> Async.RunSynchronously
-    let tableName  = match initResult with 
-                     | Success tableName -> tableName 
-                     | Failure(_, exn)   -> raise <| InitializationFailedException exn
-
-    let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
-                      .Subscribe(fun _ -> stateTableReadyEvent.Trigger(tableName.ToString())
-                                          logDebug "State table [{0}] is ready" [| tableName |])
+    let initTable () = 
+       match DynamoDBUtils.initStateTable dynamoDB config tableName with
+       | Success _   -> ()
+       | Failure exn -> raise <| InitializationFailedException exn
+    do initTable |> withRetry 3
 
     // this is a mutable dictionary of workers but can only be mutated from within the controller agent
     // which is single threaded by nature so there's no need for placing locks around add/remove operations
@@ -393,7 +391,12 @@ and ReactoKinesixApp (awsKey     : string,
                 logInfo "Starting workers for [{0}] shards : [{1}]" logArgs
                 do! updateWorkers newShards startWorker
        }
-    do Async.Start(refresh, cts.Token)
+       
+    let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
+                      .Subscribe(fun _ -> 
+                            stateTableReadyEvent.Trigger(tableName.ToString())
+                            logDebug "State table [{0}] is ready, initializing workers..." [| tableName |]
+                            Async.Start(refresh, cts.Token))
 
     let refreshSub = Observable.Interval(config.CheckStreamChangesFrequency)
                         .Subscribe(fun _ -> Async.Start(refresh, cts.Token))

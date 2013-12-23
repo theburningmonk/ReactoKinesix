@@ -39,6 +39,15 @@ module internal Utils =
             let msg = String.Format(format, args)
             logger.Error(msg, exn)
 
+    let withRetry n f =
+        let rec loop n = 
+            try
+                f()
+            with
+            | ex -> if n = 0 then reraise() else loop (n - 1)
+
+        loop n
+
     /// Default function for calcuating delay (in milliseconds) between retries, based on (http://en.wikipedia.org/wiki/Exponential_backoff)
     /// TODO : can be memoized
     let private exponentialDelay attempts =
@@ -197,10 +206,8 @@ module internal KinesisUtils =
 
 module internal DynamoDBUtils =
     type IAmazonDynamoDB with
-        member this.CreateTableAsync req    = Async.FromBeginEnd(req, this.BeginCreateTable, this.EndCreateTable)
         member this.DescribeTableAsync req  = Async.FromBeginEnd(req, this.BeginDescribeTable, this.EndDescribeTable)
         member this.GetItemAsync req        = Async.FromBeginEnd(req, this.BeginGetItem, this.EndGetItem)        
-        member this.ListTablesAsync req     = Async.FromBeginEnd(req, this.BeginListTables, this.EndListTables)
         member this.PutItemAsync req        = Async.FromBeginEnd(req, this.BeginPutItem, this.EndPutItem)
         member this.UpdateItemAsync req     = Async.FromBeginEnd(req, this.BeginUpdateItem, this.EndUpdateItem)
 
@@ -237,54 +244,50 @@ module internal DynamoDBUtils =
             | _ -> Shard(WorkerId workerId, fromHeartbeatTimestamp heartbeat, checkpoint)
 
     /// Returns the list of tables that currently exist in DynamoDB
-    let getTables (dynamoDB : IAmazonDynamoDB) =
-        async {
-            let req  = new ListTablesRequest()
-            let! res = dynamoDB.ListTablesAsync(req)
+    let private doesTableExist (dynamoDB : IAmazonDynamoDB) (TableName tableName) =
+        try
+            let req  = new DescribeTableRequest(TableName = tableName)        
+            let res = dynamoDB.DescribeTable(req)
 
-            logDebug "DynamoDB returned [{0}] tables : [{1}]"
-                     [| res.TableNames.Count; String.Join(",", res.TableNames) |]
+            logDebug "Table [{0}] current status [{1}], read throughput [{2}], write throughput [{3}]" 
+                     [| tableName; res.Table.TableStatus; 
+                        res.Table.ProvisionedThroughput.ReadCapacityUnits;
+                        res.Table.ProvisionedThroughput.WriteCapacityUnits |]
+            true
+        with
+        | :? Amazon.DynamoDBv2.Model.ResourceNotFoundException ->
+            logDebug "Table [{0}] not found" [| tableName |]
+            false
 
-            return res.TableNames
-        }
+    /// Creates a table in DynamoDB with the specified config and name
+    let createTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) (TableName tableName) =
+        try
+            let req = new CreateTableRequest(TableName = tableName)
+            req.AttributeDefinitions.Add(new AttributeDefinition(AttributeName = shardIdAttr, AttributeType = ScalarAttributeType.S))
+            req.KeySchema.Add(new KeySchemaElement(AttributeName = shardIdAttr, KeyType = KeyType.HASH))
+            let throughput = new ProvisionedThroughput(ReadCapacityUnits  = config.DynamoDBReadThroughput,
+                                                       WriteCapacityUnits = config.DynamoDBWriteThroughput)
+            req.ProvisionedThroughput <- throughput
+        
+            let res = dynamoDB.CreateTable(req)
+            logDebug "Created state table [{0}], current status [{1}], read throughput [{2}], write throughput [{3}]"
+                        [| tableName; res.TableDescription.TableStatus; 
+                           res.TableDescription.ProvisionedThroughput.ReadCapacityUnits;
+                           res.TableDescription.ProvisionedThroughput.WriteCapacityUnits |]
+
+            Success ()
+        with
+        | :? ResourceInUseException -> 
+            // already exists (perhaps race condition with multiple workers trying to create table at the same time)
+            logWarn "(Possible race condition) State table [{0}] already exists" [| tableName |]
+            Success ()
+        | exn -> Failure exn
 
     /// Initializes the application state table if necessary and returns the table name
-    let initStateTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) appName =
-        let appTableName = sprintf "%s%s" appName config.DynamoDBTableSuffix
-
-        logDebug "Initiating state table [{0}] for app [{1}]" [| appTableName; appName |]
-
-        async {
-            let! tableNames = getTables dynamoDB
-
-            match tableNames |> Seq.exists ((=) appTableName) with
-            | true -> 
-                logDebug "State table [{0}] already exists for app [{1}]" [| appTableName; appName |]
-                return Success(TableName appTableName)
-            | _     -> 
-                let req = new CreateTableRequest(TableName = appTableName)
-                req.AttributeDefinitions.Add(new AttributeDefinition(AttributeName = shardIdAttr, AttributeType = ScalarAttributeType.S))
-                req.KeySchema.Add(new KeySchemaElement(AttributeName = shardIdAttr, KeyType = KeyType.HASH))
-                req.ProvisionedThroughput <- new ProvisionedThroughput(ReadCapacityUnits  = config.DynamoDBReadThroughput,
-                                                                       WriteCapacityUnits = config.DynamoDBWriteThroughput)
-        
-                let! res = dynamoDB.CreateTableAsync(req) |> Async.Catch
-                match res with
-                | Choice1Of2 res -> 
-                    logDebug "Created state table [{0}] for app [{1}], current status [{2}], read throughput [{3}], write throughput [{4}]"
-                             [| appTableName; appName; res.TableDescription.TableStatus; 
-                                res.TableDescription.ProvisionedThroughput.ReadCapacityUnits;
-                                res.TableDescription.ProvisionedThroughput.WriteCapacityUnits |]
-
-                    return Success(TableName appTableName)
-                | Choice2Of2 exn ->
-                    match exn with
-                    | :? ResourceInUseException -> 
-                        // already exists (perhaps race condition with multiple workers trying to create table at the same time)
-                        logWarn "(Possible race condition) State table [{0}] already exists for app [{1}]" [| appTableName; appName |]
-                        return Success(TableName appTableName)
-                    | _ -> return Failure((), exn)
-        }
+    let initStateTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) tableName =
+        match doesTableExist dynamoDB tableName with
+        | true -> Success ()
+        | _    -> createTable dynamoDB config tableName
 
     /// Waits till the DynamoDB table is ready
     let rec awaitStateTableReady (dynamoDB : IAmazonDynamoDB) (TableName tableName as tn) =
@@ -307,11 +310,11 @@ module internal DynamoDBUtils =
             logDebug "Creating shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
 
             let req = new PutItemRequest(TableName = tableName)
-            req.Item.Add(shardIdAttr, new AttributeValue(S = shardId))
-            req.Item.Add(workerIdAttr, new AttributeValue(S = workerId))
+            req.Item.Add(shardIdAttr,       new AttributeValue(S = shardId))
+            req.Item.Add(workerIdAttr,      new AttributeValue(S = workerId))
             req.Item.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
         
-            req.Expected.Add(workerIdAttr, new ExpectedAttributeValue(Exists = false))
+            req.Expected.Add(workerIdAttr,  new ExpectedAttributeValue(Exists = false))
 
             try
                 do! dynamoDB.PutItemAsync(req) |> Async.Ignore
