@@ -57,6 +57,7 @@
     <Compile Include="Utils.fs" />
     <Compile Include="Client.fs" />
     <None Include="Test.fsx" />
+    <None Include="Test2.fsx" />
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
