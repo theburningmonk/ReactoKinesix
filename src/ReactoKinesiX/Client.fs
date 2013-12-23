@@ -56,7 +56,6 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
     
     let disposeInvoked = ref 0
     let dispose () = (this :> IDisposable).Dispose()
-
     let cts = new CancellationTokenSource();
 
     let updateHeartbeat _ = 
@@ -162,6 +161,12 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
             processErroredEvent.Trigger(record, ex)
             Failure(SequenceNumber record.SequenceNumber, ex)
 
+    let onShardClosed _ =
+        logInfo "Shard is closed, no more records will be available." [||]                    
+        updateIsClosed()
+        app.MarkAsClosed(shardId)
+        app.StopProcessing(shardId)
+
     let stopProcessing       = conditionalCheckFailedEvent.Publish.Take(1)
     let stopProcessingLogSub = stopProcessing.Subscribe(fun _ -> logDebug "Stop processing..." [||])
                          
@@ -213,11 +218,7 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                     batchProcessedEvent.Trigger(count, NoIteratorToken <| AtSequenceNumber seqNum))
 
     // only deal with the shard closed event the first time we see it
-    let _ = shardClosedEvent.Publish
-                .Take(1)
-                .Subscribe(fun _ ->
-                    logInfo "Shard is closed, no more records will be available." [||]                    
-                    updateIsClosed())
+    let _ = shardClosedEvent.Publish.Take(1).Subscribe(onShardClosed)
 
     // this is the initialization sequence
     let init = 
@@ -267,8 +268,7 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                     | Processing(workerId', seqNum) ->
                         // the shard is being processed by another worker, for now, give up
                         logDebug "Shard is currently being processed by worker [{0}], last checkpoint [{1}], retiring." [| workerId'; seqNum |]
-                        let (ShardId shardId') = shardId
-                        (app :> IReactoKinesixApp).StopProcessing(shardId') |> ignore
+                        app.StopProcessing(shardId)
         }
 
     // keep retrying failed initializations until it succeeds
@@ -342,7 +342,7 @@ and ReactoKinesixApp private (awsKey     : string,
 
     // this is a mutable dictionary of workers but can only be mutated from within the controller agent
     // which is single threaded by nature so there's no need for placing locks around add/remove operations
-    let knownShards = new HashSet<ShardId>()
+    let knownShards = new Dictionary<ShardId, bool>()
     let workers = new Dictionary<ShardId, ReactoKinesix>()
     let body (inbox : Agent<ControlMessage>) = 
         async {
@@ -364,7 +364,10 @@ and ReactoKinesixApp private (awsKey     : string,
                         reply.Reply()                        
                     | _ -> reply.Reply()
                 | AddKnownShard(shardId, reply) ->
-                    knownShards.Add(shardId) |> ignore
+                    if not <| knownShards.ContainsKey(shardId) then knownShards.Add(shardId, false)
+                    reply.Reply()
+                | MarkAsClosed(shardId, reply) ->
+                    knownShards.[shardId] <- true
                     reply.Reply()
         }
     let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn "Controller agent was restarted due to exception :\n {0}" [| exn |])
@@ -372,6 +375,7 @@ and ReactoKinesixApp private (awsKey     : string,
     let startWorker shardId   = controller.PostAndAsyncReply(fun reply -> StartWorker(shardId, reply))
     let stopWorker  shardId   = controller.PostAndAsyncReply(fun reply -> StopWorker(shardId, reply))
     let addKnownShard shardId = controller.PostAndAsyncReply(fun reply -> AddKnownShard(shardId, reply))
+    let markAsClosed shardId  = controller.PostAndAsyncReply(fun reply -> MarkAsClosed(shardId, reply))
 
     let updateWorkers (shardIds : string seq) (update : ShardId -> Async<unit>) = 
         async {
@@ -387,8 +391,8 @@ and ReactoKinesixApp private (awsKey     : string,
             let! shards  = KinesisUtils.getShards kinesis streamName
             let shardIds = shards |> Seq.map (fun shard -> shard.ShardId) |> Set.ofSeq
 
-            let knownShards = knownShards |> Seq.map (fun (ShardId shardId) -> shardId) |> Set.ofSeq
-            let newShards     = Set.difference shardIds knownShards
+            let knownShards = knownShards.Keys |> Seq.map (fun (ShardId shardId) -> shardId) |> Set.ofSeq
+            let newShards   = Set.difference shardIds knownShards
 
             if newShards.Count > 0 then
                 let logArgs : obj[] = [| newShards.Count; String.Join(",", newShards) |]
@@ -437,6 +441,9 @@ and ReactoKinesixApp private (awsKey     : string,
     member internal this.StreamName = streamName
     member internal this.WorkerId   = workerId
     member internal this.Processor  = processor
+    
+    member internal this.MarkAsClosed shardId   = markAsClosed shardId |> ignore
+    member internal this.StopProcessing shardId = stopWorker shardId   |> ignore
 
     static member CreateNew(awsKey, awsSecret, region, appName, streamName, workerId, processor, ?config) =
         let config = defaultArg config <| new ReactoKinesixConfig()

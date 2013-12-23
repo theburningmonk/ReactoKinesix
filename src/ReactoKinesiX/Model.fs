@@ -121,3 +121,4 @@ module internal InternalModel =
         | StartWorker      of ShardId * AsyncReplyChannel<unit>
         | StopWorker       of ShardId * AsyncReplyChannel<unit>
         | AddKnownShard    of ShardId * AsyncReplyChannel<unit>
+        | MarkAsClosed     of ShardId * AsyncReplyChannel<unit>
