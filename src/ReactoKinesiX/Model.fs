@@ -33,8 +33,8 @@ type ReactoKinesixConfig () =
     /// How frequenty should we check for shard merges/splits in the stream. Default is 1 minute.
     member val CheckStreamChangesFrequency  = TimeSpan.FromMinutes(1.0) with get, set
 
-    /// How frequently should we check for shards whose worker has died. Default is 1 minute.
-    member val CheckUnprocessedShardsFrequency = TimeSpan.FromMilliseconds(1.0) with get, set
+    /// How frequently should we check for shards whose worker has died. Default is 3 minute.
+    member val CheckUnprocessedShardsFrequency = TimeSpan.FromMinutes(3.0) with get, set
 
 [<AutoOpen>]
 module Exceptions =

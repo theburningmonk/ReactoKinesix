@@ -387,6 +387,8 @@ and ReactoKinesixApp private (awsKey     : string,
        | Failure exn -> raise <| InitializationFailedException exn
     do initTable |> withRetry 3
 
+    let runScheduledTask freq job = Observable.Interval(freq).Subscribe(fun _ -> Async.Start(job, cts.Token))
+
     // this is a mutable dictionary of workers but can only be mutated from within the controller agent
     // which is single threaded by nature so there's no need for placing locks around add/remove operations
     let knownShards = new Dictionary<ShardId, bool>()
@@ -460,9 +462,23 @@ and ReactoKinesixApp private (awsKey     : string,
                             logDebug "State table [{0}] is ready, initializing workers..." [| tableName |]
                             Async.Start(refresh, cts.Token))
 
-    let refreshSub   = Observable
-                            .Interval(config.CheckStreamChangesFrequency)
-                            .Subscribe(fun _ -> Async.Start(refresh, cts.Token))
+    let refreshSub = runScheduledTask config.CheckStreamChangesFrequency refresh
+
+    let checkUnprocessed =
+        async {
+            let processedShards   = workers.Keys |> Seq.map (fun (ShardId shardId) -> shardId) |> Set.ofSeq
+            let unprocessedShards = knownShards 
+                                    |> Seq.choose (fun (KeyValue(ShardId shardId, isClosed)) -> 
+                                        if not isClosed && not <| processedShards.Contains shardId then Some shardId else None)
+                                    |> Set.ofSeq
+            if unprocessedShards.Count > 0 then
+                let logArgs : obj[] = [| unprocessedShards.Count; String.Join(",", unprocessedShards) |]
+                logInfo "Found [{0}] shards that are not closed and not processed by this worker : [{1}]" logArgs                        
+                logInfo "Starting workers for [{0}] shards : [{1}]" logArgs
+                do! updateWorkers unprocessedShards startWorker
+        }
+
+    let checkUnprocessedSub = runScheduledTask config.CheckUnprocessedShardsFrequency checkUnprocessed
 
     let workCountSub = workerCountChangedEvent.Publish.Subscribe(fun n -> logDebug "Worker count changed to [{0}]" [| n |])
 
