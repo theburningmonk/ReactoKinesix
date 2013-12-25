@@ -14,6 +14,7 @@
 open System
 open System.IO
 open System.Text
+open System.Threading
 open Amazon
 open Amazon.DynamoDBv2.DocumentModel
 open Amazon.Kinesis.Model
@@ -41,6 +42,7 @@ let putRecord (payload : string) =
 let act (record : Record) =
     use streamReader = new StreamReader(record.Data)
     printfn "\n\n\n\n\n\n\n\n\n\n%s : %s\n\n\n\n\n\n\n\n\n\n" record.SequenceNumber <| streamReader.ReadToEnd()
+    
 
 let act2 (record : Record) =
     use streamReader = new StreamReader(record.Data)
@@ -55,15 +57,24 @@ let act2 (record : Record) =
 =================================================
 
 """         record.SequenceNumber <| streamReader.ReadToEnd()
+    
+
+let act3 (record : Record) =
+    printfn "\n\n\n\n\n\n\n\n\n\n\n\nSleeping...\n\n\n\n\n\n\n\n\n\n\n"
+    Thread.Sleep(5000)
+
 
 let processor = { new IRecordProcessor with member this.Process record = act record }
 let processor2 = { new IRecordProcessor with member this.Process record = act2 record }
+let processor3 = { new IRecordProcessor with member this.Process record = act3 record }
 
 let app = ReactoKinesixApp.CreateNew(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM", processor)
 
-app.StartProcessing("shardId-000000000002")
-app.StopProcessing("shardId-000000000002")
-app.ChangeProcessor(processor2)
+app.StartProcessing("shardId-000000000003")
+app.StartProcessing("shardId-000000000004")
+app.StopProcessing("shardId-000000000003")
+app.StopProcessing("shardId-000000000004")
+app.ChangeProcessor(processor3)
 
 //{ 1..100 } |> Seq.iter (fun i -> putRecord <| i.ToString())
 

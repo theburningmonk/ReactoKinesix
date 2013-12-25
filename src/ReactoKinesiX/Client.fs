@@ -53,9 +53,10 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
     let conditionalCheckFailedEvent = new Event<unit>()           // when a conditional check failure was encountered when writing to the state table
 
     let shardClosedEvent            = new Event<unit>() // when the shard is closed and will not return any more data (i.e. NextShardIterator is null)
+    let stopProcessingEvent         = new Event<unit>() // when the worker is trying to stop processing of any further records
+    let stoppedEvent                = new Event<unit>() // when the worker has completed stopped
     
     let disposeInvoked = ref 0
-    let dispose () = (this :> IDisposable).Dispose()
     let cts = new CancellationTokenSource();
 
     let updateHeartbeat _ = 
@@ -69,7 +70,6 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                 | Choice2Of2 ex -> match ex with 
                                    | :? ConditionalCheckFailedException -> 
                                         conditionalCheckFailedEvent.Trigger()
-                                        dispose()
                                    | _ -> // TODO : what's the right thing to do here?
                                           // a) give up, let the next cycle (or next checkpoint update) update the heartbeat
                                           // b) retry a few times
@@ -93,7 +93,6 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                 | Choice2Of2 exn -> match exn with
                                     | :? ConditionalCheckFailedException ->  
                                         conditionalCheckFailedEvent.Trigger()
-                                        dispose()
                                     | _ -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
                                            updateIsClosed()
             }
@@ -109,7 +108,6 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                 | Choice2Of2 ex -> match ex with 
                                    | :? ConditionalCheckFailedException -> 
                                         conditionalCheckFailedEvent.Trigger()
-                                        dispose()
                                    | exn -> 
                                           // TODO : what's the right thing to do here if we failed to update checkpoint? 
                                           // a) keep going and risk allowing more records to be processed multiple times
@@ -138,7 +136,7 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                     logDebug "Received batch of [{0}] records, no more records will be available (end of shard)" [| Seq.length batch |]
                     batchReceivedEvent.Trigger(EndOfShard, batch)
                 | Success(nextIterator, batch) -> 
-                    logDebug "Received batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length batch |]
+                    logDebug "Received batch of [{0}] records, next iterator [{1}]" [| Seq.length batch; iterator |]
                     batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
                 | Failure(exn) -> 
                     match exn with
@@ -161,64 +159,108 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
             processErroredEvent.Trigger(record, ex)
             Failure(SequenceNumber record.SequenceNumber, ex)
 
+    let processBatch (iterator, records) =
+        logDebug "Start processing batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records |]
+
+        match Seq.isEmpty records with
+        | true -> 
+            emptyReceiveEvent.Trigger()
+            batchProcessedEvent.Trigger(0, iterator)
+        | _ -> 
+            // keep processing the records until the first error
+            let count, lastResult = 
+                records 
+                |> Seq.scan (fun (count, _) record -> 
+                    let res = processRecord record
+                    (count + 1, Some res)) (0, None)
+                |> Seq.takeWhile (fun (_, res) -> match res with | Some (Failure _) -> false | _ -> true)
+                |> Seq.reduce (fun _ lastRes -> lastRes)
+
+            match lastResult with
+            | Some (Success seqNum)      -> 
+                logDebug "Batch was fully processed [{0}], last sequence number [{1}]" [| count; seqNum |]
+
+                updateCheckpoint(seqNum)
+                batchProcessedEvent.Trigger(count, iterator)
+            | Some (Failure (seqNum, _)) -> 
+                logWarn "Batch was partially processed [{0}/{1}], last successful sequence number [{2}]" 
+                        [| count; Seq.length records; seqNum |]
+
+                updateCheckpoint(seqNum)
+                batchProcessedEvent.Trigger(count, NoIteratorToken <| AtSequenceNumber seqNum)
+
     let onShardClosed _ =
         logInfo "Shard is closed, no more records will be available." [||]                    
         updateIsClosed()
         app.MarkAsClosed(shardId)
-        app.StopProcessing(shardId)
+        stoppedEvent.Trigger()
 
-    let stopProcessing       = conditionalCheckFailedEvent.Publish.Take(1)
-    let stopProcessingLogSub = stopProcessing.Subscribe(fun _ -> logDebug "Stop processing..." [||])
-                         
-    let heartbeat        = Observable.Interval(app.Config.Heartbeat).TakeUntil(stopProcessing)
-    let heartbeatSub     = heartbeat.Subscribe(updateHeartbeat)
+    // stop processing anymore records if we encountered conditional check errors (indicative of another worker having taken over
+    // control of the shard from us), or if we were explicitly told to stop (indicated by the stoppingProcessingEvent)
+    let stopProcessing = stopProcessingEvent.Publish
+                            .Merge(conditionalCheckFailedEvent.Publish)
+                            .Take(1)
+    let _ = stopProcessing.Subscribe(fun _ -> logInfo "Stopping..." [||])
+
+    let stopped = stoppedEvent.Publish.Take(1)
+    let _       = stopped.Subscribe(fun _ -> 
+                    logInfo "Processing has stopped." [||]
+                    (this :> IDisposable).Dispose())
+
+    let _       = Observable
+                    .Interval(app.Config.Heartbeat)
+                    .TakeUntil(stopped)
+                    .Subscribe(updateHeartbeat)
+
+    let checkpoint  = checkpointEvent.Publish.Select(fun _ -> ())
 
     // signal to process the next batch of records that has been received
-    let nextBatch       = initializedEvent.Publish
-                            .Merge(Observable.Delay(emptyReceiveEvent.Publish, app.Config.EmptyReceiveDelay))
-                            .Merge(checkpointEvent.Publish.Select(fun _ -> ()))
+    let nextBatch   = initializedEvent.Publish
+                        .Merge(Observable.Delay(emptyReceiveEvent.Publish, app.Config.EmptyReceiveDelay))
+                        .Merge(checkpoint)
+                        .TakeUntil(stopProcessing)
+
+    let processed   = batchProcessedEvent.Publish
 
     // fetch new records after the previous batch has been processed until we need to either stop processing or the shard is closed
     let stopFetching    = stopProcessing.Merge(shardClosedEvent.Publish)
-    let fetch           = batchProcessedEvent.Publish.TakeUntil(stopFetching)
-    let fetchSub        = fetch.Subscribe(fun (_, iterator) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
+
+    let fetch           = processed.TakeUntil(stopFetching)
+    let _               = fetch.Subscribe(fun (_, iterator) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
 
     let received        = batchReceivedEvent.Publish
+
+    // after we have received the next batch of records, wait for the nextBatch signal.
+    // this could include a forced period of delay if the last batch was empty even if this batch is not empty, this is so that
+    // we don't spam Kinesis with too many calls when there are no records to process
     let processing      = received
                             .Zip(nextBatch, fun receivedBatch _ -> receivedBatch)
                             .TakeUntil(stopProcessing)
-    let processingSub   = 
-        processing.Subscribe(fun (iterator, records) ->
-            logDebug "Start processing batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records |]
-
-            match Seq.isEmpty records with
-            | true -> 
-                emptyReceiveEvent.Trigger()
-                batchProcessedEvent.Trigger(0, iterator)
-            | _ -> 
-                let count, lastResult = 
-                    records 
-                    |> Seq.scan (fun (count, _) record -> 
-                        let res = processRecord record
-                        (count + 1, Some res)) (0, None)
-                    |> Seq.takeWhile (fun (_, res) -> match res with | Some (Failure _) -> false | _ -> true)
-                    |> Seq.reduce (fun _ lastRes -> lastRes)
-
-                match lastResult with
-                | Some (Success seqNum)      -> 
-                    logDebug "Batch was fully processed [{0}], last sequence number [{1}]" [| count; seqNum |]
-
-                    updateCheckpoint(seqNum)
-                    batchProcessedEvent.Trigger(count, iterator)
-                | Some (Failure (seqNum, _)) -> 
-                    logWarn "Batch was partially processed [{0}/{1}], last successful sequence number [{2}]" 
-                            [| count; Seq.length records; seqNum |]
-
-                    updateCheckpoint(seqNum)
-                    batchProcessedEvent.Trigger(count, NoIteratorToken <| AtSequenceNumber seqNum))
+    let processingSub   = processing.Subscribe(fun args -> processBatch args)
 
     // only deal with the shard closed event the first time we see it
     let _ = shardClosedEvent.Publish.Take(1).Subscribe(onShardClosed)
+
+    // when the stop is triggered during a current batch then the next checkpoint/empty receive event tells us the current batch is 
+    // finished so we can trigger the stopped event, e.g.
+    //      ---processing---stop----processed----checkpoint (when records were received)
+    //      ---processing-------processed--stop--checkpoint (when records were received)
+    //      ---processing---stop--empty receive--processed  (when no records were received)
+    // if the stop came between empty receive and processed then it'll be handled by the next case.
+    //
+    // when the stop is triggered when fetching records then the next receive event will suffice as signal that it's safe to
+    // assume that we can trigger the stopped event since the processing stream will not proceed now that stop has been triggered
+    //      processed---stop---received
+    //                fetching
+    //
+    // hence the stop points consist of checkpoint, empty receive and received
+    let stopPoints = checkpoint
+                        .Merge(emptyReceiveEvent.Publish)
+                        .Merge(received.Select(fun _ -> ()))
+    let _ = stopProcessing
+                .CombineLatest(stopPoints, fun _ _ -> ())
+                .Take(1)
+                .Subscribe(fun _ -> stoppedEvent.Trigger())
 
     // this is the initialization sequence
     let init = 
@@ -256,7 +298,6 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                         with
                         | :? ConditionalCheckFailedException ->
                             conditionalCheckFailedEvent.Trigger()
-                            dispose()
                         | exn -> initializationFailedEvent.Trigger(exn)
 
                     | Processing(workerId', seqNum) when workerId' = app.WorkerId -> 
@@ -268,7 +309,7 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                     | Processing(workerId', seqNum) ->
                         // the shard is being processed by another worker, for now, give up
                         logDebug "Shard is currently being processed by worker [{0}], last checkpoint [{1}], retiring." [| workerId'; seqNum |]
-                        app.StopProcessing(shardId)
+                        stoppedEvent.Trigger()
         }
 
     // keep retrying failed initializations until it succeeds
@@ -285,11 +326,16 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
 
             cts.Cancel()
 
-            [| stopProcessingLogSub; heartbeatSub; fetchSub;
-               processingSub; retryInitSub; (cts :> IDisposable) |]
+            [| processingSub; retryInitSub; (cts :> IDisposable) |]
             |> Array.iter (fun x -> x.Dispose())
 
             logDebug "Disposed." [||]
+
+    [<CLIEvent>] member this.OnStopped = stoppedEvent.Publish
+
+    member this.Stop () = 
+        stopProcessingEvent.Trigger()
+        stoppedEvent.Publish.Wait()
 
     interface IDisposable with
         member this.Dispose () = 
@@ -355,14 +401,19 @@ and ReactoKinesixApp private (awsKey     : string,
                     | true, worker -> reply.Reply()
                     | _ -> let worker = new ReactoKinesix(this, shardId)
                            workers.Add(shardId, worker)
+                           worker.OnStopped.Add(fun _ -> inbox.Post(RemoveWorker(shardId)))
                            reply.Reply()
                 | StopWorker(shardId, reply) -> 
                     match workers.TryGetValue(shardId) with
                     | true, worker -> 
-                        (worker :> IDisposable).Dispose()
-                        workers.Remove(shardId) |> ignore
-                        reply.Reply()                        
+                        async {
+                            worker.Stop()
+                            reply.Reply()
+                        }
+                        |> Async.Start
+                        
                     | _ -> reply.Reply()
+                | RemoveWorker(shardId) -> workers.Remove(shardId) |> ignore
                 | AddKnownShard(shardId, reply) ->
                     if not <| knownShards.ContainsKey(shardId) then knownShards.Add(shardId, false)
                     reply.Reply()
@@ -451,7 +502,7 @@ and ReactoKinesixApp private (awsKey     : string,
 
     interface IReactoKinesixApp with
         member this.StartProcessing (shardId : string) = startWorker (ShardId shardId) |> Async.StartAsPlainTask
-        member this.StopProcessing  (shardId : string) = stopWorker  (ShardId shardId) |> Async.StartAsPlainTask    
+        member this.StopProcessing  (shardId : string) = stopWorker  (ShardId shardId) |> Async.StartAsPlainTask
         member this.ChangeProcessor newProcessor       = processor <- newProcessor
 
     interface IDisposable with

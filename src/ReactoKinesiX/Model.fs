@@ -118,7 +118,8 @@ module internal InternalModel =
     type ProcessResult  = Result<SequenceNumber, SequenceNumber * Exception>
 
     type ControlMessage =
-        | StartWorker      of ShardId * AsyncReplyChannel<unit>
-        | StopWorker       of ShardId * AsyncReplyChannel<unit>
-        | AddKnownShard    of ShardId * AsyncReplyChannel<unit>
-        | MarkAsClosed     of ShardId * AsyncReplyChannel<unit>
+        | StartWorker       of ShardId * AsyncReplyChannel<unit>
+        | StopWorker        of ShardId * AsyncReplyChannel<unit>
+        | RemoveWorker      of ShardId
+        | AddKnownShard     of ShardId * AsyncReplyChannel<unit>
+        | MarkAsClosed      of ShardId * AsyncReplyChannel<unit>
