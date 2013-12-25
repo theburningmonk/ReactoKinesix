@@ -460,9 +460,11 @@ and ReactoKinesixApp private (awsKey     : string,
                             logDebug "State table [{0}] is ready, initializing workers..." [| tableName |]
                             Async.Start(refresh, cts.Token))
 
-    let refreshSub = Observable.Interval(config.CheckStreamChangesFrequency)
-                        .Subscribe(fun _ -> Async.Start(refresh, cts.Token))
-    let _ = workerCountChangedEvent.Publish.Subscribe(fun n -> logDebug "Worker count changed to [{0}]" [| n |])
+    let refreshSub   = Observable
+                            .Interval(config.CheckStreamChangesFrequency)
+                            .Subscribe(fun _ -> Async.Start(refresh, cts.Token))
+
+    let workCountSub = workerCountChangedEvent.Publish.Subscribe(fun n -> logDebug "Worker count changed to [{0}]" [| n |])
 
     let disposeInvoked = ref 0
     let cleanup (disposing : bool) =
@@ -485,6 +487,8 @@ and ReactoKinesixApp private (awsKey     : string,
                 workerCountChangedEvent.Publish.Where(fun n -> n = 0).Take(1).Wait() |> ignore
 
                 logDebug "Workers stopped..." [||]
+            
+            workCountSub.Dispose()
 
             cts.Cancel()
             cts.Dispose()
