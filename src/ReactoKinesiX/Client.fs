@@ -241,19 +241,21 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
     // only deal with the shard closed event the first time we see it
     let _ = shardClosedEvent.Publish.Take(1).Subscribe(onShardClosed)
 
-    // when the stop is triggered during a current batch then the next checkpoint/empty receive event tells us the current batch is 
-    // finished so we can trigger the stopped event, e.g.
-    //      ---processing---stop----processed----checkpoint (when records were received)
-    //      ---processing-------processed--stop--checkpoint (when records were received)
-    //      ---processing---stop--empty receive--processed  (when no records were received)
-    // if the stop came between empty receive and processed then it'll be handled by the next case.
-    //
-    // when the stop is triggered when fetching records then the next receive event will suffice as signal that it's safe to
-    // assume that we can trigger the stopped event since the processing stream will not proceed now that stop has been triggered
-    //      processed---stop---received
-    //                fetching
-    //
-    // hence the stop points consist of checkpoint, empty receive and received
+    (* 
+     * when the stop is triggered during a current batch then the next checkpoint/empty receive event tells us the current batch is 
+     * finished so we can trigger the stopped event, e.g.
+     *      ---processing---stop----processed----checkpoint (when records were received)
+     *      ---processing-------processed--stop--checkpoint (when records were received)
+     *      ---processing---stop--empty receive--processed  (when no records were received)
+     * if the stop came between empty receive and processed then it'll be handled by the next case.
+     *
+     * when the stop is triggered when fetching records then the next receive event will suffice as signal that it's safe to
+     * assume that we can trigger the stopped event since the processing stream will not proceed now that stop has been triggered
+     *      processed---stop---received
+     *                fetching
+     *
+     * hence the stop points consist of checkpoint, empty receive and received
+     *)
     let stopPoints = checkpoint
                         .Merge(emptyReceiveEvent.Publish)
                         .Merge(received.Select(fun _ -> ()))
