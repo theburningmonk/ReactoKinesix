@@ -335,9 +335,7 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
 
     [<CLIEvent>] member this.OnStopped = stoppedEvent.Publish
 
-    member this.Stop () = 
-        stopProcessingEvent.Trigger()
-        stoppedEvent.Publish.Wait()
+    member this.Stop () = stopProcessingEvent.Trigger()
 
     interface IDisposable with
         member this.Dispose () = 
@@ -374,7 +372,8 @@ and ReactoKinesixApp private (awsKey     : string,
 
     let cts = new CancellationTokenSource()
 
-    let stateTableReadyEvent = new Event<string>()
+    let stateTableReadyEvent     = new Event<string>()  // when the state able is confirmed to be ready
+    let workerCountChangedEvent  = new Event<int>()     // when the number of workers have changed
 
     let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
     let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)    
@@ -405,17 +404,16 @@ and ReactoKinesixApp private (awsKey     : string,
                            workers.Add(shardId, worker)
                            worker.OnStopped.Add(fun _ -> inbox.Post(RemoveWorker(shardId)))
                            reply.Reply()
+                           workerCountChangedEvent.Trigger(workers.Count)
                 | StopWorker(shardId, reply) -> 
                     match workers.TryGetValue(shardId) with
                     | true, worker -> 
-                        async {
-                            worker.Stop()
-                            reply.Reply()
-                        }
-                        |> Async.Start
-                        
+                        worker.Stop()
+                        reply.Reply()
                     | _ -> reply.Reply()
-                | RemoveWorker(shardId) -> workers.Remove(shardId) |> ignore
+                | RemoveWorker(shardId) -> 
+                    workers.Remove(shardId) |> ignore
+                    workerCountChangedEvent.Trigger(workers.Count)
                 | AddKnownShard(shardId, reply) ->
                     if not <| knownShards.ContainsKey(shardId) then knownShards.Add(shardId, false)
                     reply.Reply()
@@ -464,7 +462,8 @@ and ReactoKinesixApp private (awsKey     : string,
 
     let refreshSub = Observable.Interval(config.CheckStreamChangesFrequency)
                         .Subscribe(fun _ -> Async.Start(refresh, cts.Token))
-    
+    let _ = workerCountChangedEvent.Publish.Subscribe(fun n -> logDebug "Worker count changed to [{0}]" [| n |])
+
     let disposeInvoked = ref 0
     let cleanup (disposing : bool) =
         // ensure that resources are only disposed of once
@@ -473,12 +472,19 @@ and ReactoKinesixApp private (awsKey     : string,
 
             refreshSub.Dispose()
 
-            workers.Keys 
-            |> Seq.toArray 
-            |> Seq.map (fun shardId -> stopWorker shardId)
-            |> Async.Parallel
-            |> Async.Ignore
-            |> Async.RunSynchronously
+            if workers.Count > 0 then
+                logDebug "Stopping all [{0}] workers..." [| workers.Count |]
+
+                workers.Keys 
+                |> Seq.toArray 
+                |> Seq.map (fun shardId -> stopWorker shardId)
+                |> Async.Parallel
+                |> Async.Ignore
+                |> Async.Start
+                
+                workerCountChangedEvent.Publish.Where(fun n -> n = 0).Take(1).Wait() |> ignore
+
+                logDebug "Workers stopped..." [||]
 
             cts.Cancel()
             cts.Dispose()
