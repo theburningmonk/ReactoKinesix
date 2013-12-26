@@ -205,34 +205,39 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                 Failure(SequenceNumber record.SequenceNumber, exn)
 
     let processBatch (iterator, records) =
-        logDebug "Start processing batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records |]
+        let recordCount = Seq.length records
+        logDebug "Start processing batch of [{0}] records, next iterator [{1}]" [| recordCount; iterator |]
 
-        match Seq.isEmpty records with
-        | true -> 
+        match recordCount with
+        | 0 -> 
             emptyReceiveEvent.Trigger()
             batchProcessedEvent.Trigger(0, iterator)
-        | _ -> 
+        | n -> 
             // keep processing the records until the first error
-            let count, lastResult = 
+            let results = 
                 records 
-                |> Seq.scan (fun (count, _) record -> 
-                    let res = processRecord record
-                    (count + 1, Some res)) (0, None)
-                |> Seq.takeWhile (fun (_, res) -> match res with | Some (Failure _) -> false | _ -> true)
-                |> Seq.reduce (fun _ lastRes -> lastRes)
+                |> Seq.map (fun record -> processRecord record)
+                |> Seq.takeWhile (function | Failure _ -> false | _ -> true)
+                |> Seq.toArray
 
-            match lastResult with
-            | Some (Success seqNum) -> 
-                logDebug "Batch was fully processed [{0}], last sequence number [{1}]" [| count; seqNum |]
-
-                updateCheckpoint(seqNum)
-                batchProcessedEvent.Trigger(count, iterator)
-            | Some (Failure (seqNum, _)) -> 
+            match results with
+            | [||] ->
+                logWarn "First record failed. No record was proccessed." [||]
+                emptyReceiveEvent.Trigger()
+                batchProcessedEvent.Trigger(0, iterator)
+            | arr when arr.Length < n ->
+                let (Success(seqNum)) = arr.[arr.Length - 1]
                 logWarn "Batch was partially processed [{0}/{1}], last successful sequence number [{2}]" 
-                        [| count; Seq.length records; seqNum |]
+                        [| arr.Length; n; seqNum |]
 
                 updateCheckpoint(seqNum)
-                batchProcessedEvent.Trigger(count, NoIteratorToken <| AtSequenceNumber seqNum)
+                batchProcessedEvent.Trigger(arr.Length, NoIteratorToken <| AtSequenceNumber seqNum)
+            | arr when arr.Length = n ->
+                let (Success(seqNum)) = arr.[arr.Length - 1]
+                logDebug "Batch was fully processed [{0}], last sequence number [{1}]" [| arr.Length; seqNum |]
+
+                updateCheckpoint(seqNum)
+                batchProcessedEvent.Trigger(arr.Length, iterator)
 
     let onShardClosed _ =
         logInfo "Shard is closed, no more records will be available." [||]                    
