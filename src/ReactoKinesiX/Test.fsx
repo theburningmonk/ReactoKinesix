@@ -72,7 +72,10 @@ let processor = { new IRecordProcessor with
                     member this.Process record = act record
                     member this.GetErrorHandlingMode _ = RetryAndStop 3
                     member this.OnMaxRetryExceeded (record, mode) = maxRetryExceeded record mode }
-//let processor2 = { new IRecordProcessor with member this.Process record = act2 record }
+let processor2 = { new IRecordProcessor with 
+                    member this.Process record = act2 record 
+                    member this.GetErrorHandlingMode _ = RetryAndStop 3
+                    member this.OnMaxRetryExceeded (record, mode) = maxRetryExceeded record mode }
 //let processor3 = { new IRecordProcessor with member this.Process record = act3 record }
 
 let app = ReactoKinesixApp.CreateNew(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM", processor)
@@ -87,3 +90,5 @@ app.StopProcessing("shardId-000000000004")
 
 (app :> IDisposable).Dispose()
 
+
+let app2 = ReactoKinesixApp.CreateNew(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM-2", processor2)

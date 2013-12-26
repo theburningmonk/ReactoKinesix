@@ -41,8 +41,8 @@ type ReactoKinesixConfig () =
     /// How frequenty should we check for shard merges/splits in the stream. Default is 1 minute.
     member val CheckStreamChangesFrequency  = TimeSpan.FromMinutes(1.0) with get, set
 
-    /// How frequently should we check for shards whose worker has died. Default is 3 minute.
-    member val CheckUnprocessedShardsFrequency = TimeSpan.FromMinutes(3.0) with get, set
+    /// How frequently should we check for shards whose worker has died. Default is 1 minute.
+    member val CheckUnprocessedShardsFrequency = TimeSpan.FromMinutes(1.0) with get, set
 
 [<AutoOpen>]
 module Exceptions =
@@ -124,10 +124,17 @@ module internal InternalModel =
         | Failure   of 'Failure
 
     type ProcessResult  = Result<SequenceNumber, SequenceNumber * Exception>
+    
+    type internal StoppedReason =
+        | UserTriggered          = 1    // worker was stopped by a user
+        | ShardClosed            = 2    // worker has stopped because its shard was closed
+        | ConditionalCheckFailed = 3    // worker has stopped because its shard was taken over by another worker
+        | ErrorInduced           = 4    // worker has stopped because of an error in processing records and the error handling mode is to stop
+        | ProcessedByOther       = 5    // worker has stopped because the shard is processed by another worker
 
     type ControlMessage =
         | StartWorker       of ShardId * AsyncReplyChannel<unit>
         | StopWorker        of ShardId * AsyncReplyChannel<unit>
-        | RemoveWorker      of ShardId
+        | RemoveWorker      of ShardId * StoppedReason
         | AddKnownShard     of ShardId * AsyncReplyChannel<unit>
         | MarkAsClosed      of ShardId * AsyncReplyChannel<unit>
