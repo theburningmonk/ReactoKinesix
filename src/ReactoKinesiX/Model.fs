@@ -3,6 +3,14 @@
 open System
 open Amazon.DynamoDBv2.DataModel
 
+/// Representing the different modes in which to handle errors when processing records
+type ErrorHandlingMode =
+    // retry up to the specified number of times before giving up and moving on to the next record
+    // NOTE : specifying zero as retry count is the same as no retry
+    | RetryAndSkip      of int
+    // retry up to the specified number of times before giving up and stop processing this shard
+    | RetryAndStop      of int
+
 type ReactoKinesixConfig () = 
     /// Read throughput to read for the DynamoDB table. Default is 10.
     member val DynamoDBReadThroughput  = 10L with get, set

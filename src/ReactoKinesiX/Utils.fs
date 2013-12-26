@@ -40,11 +40,7 @@ module internal Utils =
             logger.Error(msg, exn)
 
     let withRetry n f =
-        let rec loop n = 
-            try
-                f()
-            with
-            | ex -> if n = 0 then reraise() else loop (n - 1)
+        let rec loop n = try f() with | _ -> if n = 0 then reraise() else loop (n - 1)
 
         loop n
 

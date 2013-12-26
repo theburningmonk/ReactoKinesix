@@ -19,14 +19,29 @@ open Amazon.Kinesis.Model
 open ReactoKinesix.Model
 open ReactoKinesix.Utils
 
+/// Represents a processor that is responsible for processing any records received from the stream.
 type IRecordProcessor = 
+    /// Process a record
     abstract member Process : Record -> unit
 
+    /// Determines how to handle a record which had failed to be processed
+    abstract member GetErrorHandlingMode    : Record -> ErrorHandlingMode
+
+    /// This method is called when we have exceeded the number of retries for a record
+    abstract member OnMaxRetryExceeded      : Record * ErrorHandlingMode -> unit
+
+/// Represents a client application that consumes records from a Kinesis stream.
+/// Please use the static method "ReactoKinesixApp.CreateNew(...)" to create a new Kinesis client application.
 type IReactoKinesixApp =
     inherit IDisposable
 
+    /// Force the application to try and start processing a particular shard
     abstract member StartProcessing : shardId : string -> Task
+
+    /// Force the application to stop processing a particuar shard
     abstract member StopProcessing  : shardId : string -> Task
+
+    /// Change the processor that will be used to process received records
     abstract member ChangeProcessor : newProcessor : IRecordProcessor -> unit
 
 type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this =
@@ -41,7 +56,6 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
 
     let batchReceivedEvent          = new Event<Iterator * Record seq>() // when a new batch of records have been received
     let recordProcessedEvent        = new Event<Record>()                // when a record has been processed by processor
-    let processErroredEvent         = new Event<Record * Exception>()    // when an error was caught when processing a record
     let batchProcessedEvent         = new Event<int * Iterator>()        // when a batch has finished processing with the iterator for next batch
 
     let initializedEvent            = new Event<unit>()           // when the worker has been initialized
@@ -144,20 +158,51 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                     | _ -> do! fetchNextRecords iterator
         }
 
-    let processRecord record = 
-        try 
-            // NOTE: not sure why this type annotation is required to make the type inference happy..
-            (app.Processor :> IRecordProcessor).Process(record)
+    let processRecord (record : Record) = 
+        let logArgs : obj[] = [| record.PartitionKey; record.SequenceNumber |]
 
-            logDebug "Processed record [PartitionKey:{0}, SequenceNumber:{1}]"
-                     [| record.PartitionKey; record.SequenceNumber |]
+        // NOTE: not sure why this type annotation is required to make the type inference happy..
+        let processor : IRecordProcessor = app.Processor
+
+        let inline tryProcess (record : Record) =
+            processor.Process(record)
+
+            logDebug "Processed record [PartitionKey:{0}, SequenceNumber:{1}]" logArgs
 
             recordProcessedEvent.Trigger(record)
             Success(SequenceNumber record.SequenceNumber)
+
+        let inline retryProcessAndThen record n cont =
+            let rec loop n' cont = try tryProcess record with | exn -> if n' = n then cont exn else loop (n' + 1) cont
+            loop 1 cont
+
+        let inline getErrorHandlingMode record = try processor.GetErrorHandlingMode(record) |> Success with | ex -> Failure(ex)
+
+        let inline getMaxRetryExceededHandler mode =
+            match mode with
+            | RetryAndSkip _ -> 
+                (fun _ -> logWarn "Max retry exceeded for record [PartitionKey:{0}, SequenceNumber:{1}]. Skipping..." logArgs
+                          processor.OnMaxRetryExceeded(record, mode)
+                          Success(SequenceNumber record.SequenceNumber))
+            | RetryAndStop _ -> 
+                (fun exn -> logWarn "Max retry exceeded for record [PartitionKey:{0}, SequenceNumber:{1}]. Stopping..." logArgs
+                            processor.OnMaxRetryExceeded(record, mode)
+                            stopProcessingEvent.Trigger()
+                            Failure(SequenceNumber record.SequenceNumber, exn))
+
+        try
+            tryProcess record
         with
-        | ex -> 
-            processErroredEvent.Trigger(record, ex)
-            Failure(SequenceNumber record.SequenceNumber, ex)
+        | ex ->
+            match getErrorHandlingMode record with
+            | Success (RetryAndSkip n as mode) 
+            | Success (RetryAndStop n as mode) -> 
+                getMaxRetryExceededHandler mode |> retryProcessAndThen record n
+            | Failure exn ->
+                logError exn "Unable to get error handling mode for record [PartitionKey:{0}, SequenceNumber:{1}]. No choice but to retry..." logArgs
+
+                // return failure so to defer to the fetch->process->checkpoint loop to not continue any further
+                Failure(SequenceNumber record.SequenceNumber, exn)
 
     let processBatch (iterator, records) =
         logDebug "Start processing batch of [{1}] records, next iterator [{0}]" [| iterator; Seq.length records |]
@@ -177,7 +222,7 @@ type internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this 
                 |> Seq.reduce (fun _ lastRes -> lastRes)
 
             match lastResult with
-            | Some (Success seqNum)      -> 
+            | Some (Success seqNum) -> 
                 logDebug "Batch was fully processed [{0}], last sequence number [{1}]" [| count; seqNum |]
 
                 updateCheckpoint(seqNum)
