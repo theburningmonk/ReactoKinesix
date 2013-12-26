@@ -46,34 +46,34 @@ type IReactoKinesixApp =
     abstract member ChangeProcessor : newProcessor : IRecordProcessor -> unit
 
 type internal WorkingShard =
-    | Started   of ReactoKinesix
+    | Started   of ReactoKinesixShardProcessor
     | Stopped   of StoppedReason
 
-and internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this =
-    let loggerName  = sprintf "ReactorKinesixWorker[Stream:%O, Worker:%O, Shard:%O]" app.StreamName app.WorkerId shardId
+and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : ShardId) as this =
+    let loggerName  = sprintf "ReactoKinesixShardProcessor[Stream:%O, Worker:%O, Shard:%O]" app.StreamName app.WorkerId shardId
     let logger      = LogManager.GetLogger(loggerName)
     let logDebug    = logDebug logger
     let logInfo     = logInfo  logger
     let logWarn     = logWarn  logger
     let logError    = logError logger
 
-    do logDebug "Starting worker..." [||]
+    do logDebug "Starting shard processor..." [||]
 
     let batchReceivedEvent          = new Event<Iterator * Record seq>() // when a new batch of records have been received
     let recordProcessedEvent        = new Event<Record>()                // when a record has been processed by processor
     let batchProcessedEvent         = new Event<int * Iterator>()        // when a batch has finished processing with the iterator for next batch
 
-    let initializedEvent            = new Event<unit>()           // when the worker has been initialized
-    let initializationFailedEvent   = new Event<Exception>()      // when an error was caught whist initializing the worker
+    let initializedEvent            = new Event<unit>()           // when the shard processor has been initialized
+    let initializationFailedEvent   = new Event<Exception>()      // when an error was caught whist initializing the shard processor
     
-    let emptyReceiveEvent           = new Event<unit>()           // the worker received no records from the stream
+    let emptyReceiveEvent           = new Event<unit>()           // the shard processor received no records from the stream
     let checkpointEvent             = new Event<SequenceNumber>() // when the latest checkpoint is updated in state table
     let heartbeatEvent              = new Event<unit>()           // when a heartbeat is recorded
     let conditionalCheckFailedEvent = new Event<unit>()           // when a conditional check failure was encountered when writing to the state table
 
     let shardClosedEvent            = new Event<unit>()           // when the shard is closed and will not return any more data (i.e. NextShardIterator is null)
-    let stopProcessingEvent         = new Event<StoppedReason>()  // when the worker is trying to stop processing of any further records
-    let stoppedEvent                = new Event<StoppedReason>()  // when the worker has completed stopped
+    let stopProcessingEvent         = new Event<StoppedReason>()  // when the shard processor is trying to stop processing of any further records
+    let stoppedEvent                = new Event<StoppedReason>()  // when the shard processor has completed stopped
     
     let disposeInvoked = ref 0
     let cts = new CancellationTokenSource();
@@ -397,7 +397,7 @@ and internal ReactoKinesix (app : ReactoKinesixApp, shardId : ShardId) as this =
             GC.SuppressFinalize(this)
             cleanup(true)
 
-    // provide a finalizer so that in the case the consumer forgets to dispose of the worker the
+    // provide a finalizer so that in the case the consumer forgets to dispose of the shard processor the
     // finalizer will clean up
     override this.Finalize () =
         logWarn "Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead." [||]
@@ -427,8 +427,8 @@ and ReactoKinesixApp private (awsKey     : string,
 
     let cts = new CancellationTokenSource()
 
-    let stateTableReadyEvent     = new Event<string>()  // when the state able is confirmed to be ready
-    let workerCountChangedEvent  = new Event<int>()     // when the number of workers have changed
+    let stateTableReadyEvent            = new Event<string>()  // when the state able is confirmed to be ready
+    let shardProcessorCountChangedEvent = new Event<int>()     // when the number of shard processors have changed
 
     let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
     let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)    
@@ -444,34 +444,34 @@ and ReactoKinesixApp private (awsKey     : string,
 
     let runScheduledTask freq job = Observable.Interval(freq).Subscribe(fun _ -> Async.Start(job, cts.Token))
 
-    // this is a mutable dictionary of workers but can only be mutated from within the controller agent
+    // this is a mutable dictionary of shard processor but can only be mutated from within the controller agent
     // which is single threaded by nature so there's no need for placing locks around add/remove operations
     let knownShards   = new Dictionary<ShardId, bool>()
     let workingShards = new Dictionary<ShardId, WorkingShard>()
-    let getWorkerCount () = workingShards.Values |> Seq.filter (function | Started _ -> true | _ -> false) |> Seq.length
+    let getShardProcessorCount () = workingShards.Values |> Seq.filter (function | Started _ -> true | _ -> false) |> Seq.length
     let body (inbox : Agent<ControlMessage>) = 
         async {
             while true do
                 let! msg = inbox.Receive()
 
                 match msg with
-                | StartWorker(shardId, reply) ->
+                | StartShardProcessor(shardId, reply) ->
                     match workingShards.TryGetValue(shardId) with
                     | true, Started _ -> reply.Reply()
-                    | _ -> let worker = new ReactoKinesix(this, shardId)
-                           workingShards.[shardId] <- Started worker
-                           worker.OnStopped.Add(fun reason -> inbox.Post <| RemoveWorker(shardId, reason))
+                    | _ -> let shardProcessor = new ReactoKinesixShardProcessor(this, shardId)
+                           workingShards.[shardId] <- Started shardProcessor
+                           shardProcessor.OnStopped.Add(fun reason -> inbox.Post <| RemoveShardProcessor(shardId, reason))
                            reply.Reply()
-                           workerCountChangedEvent.Trigger <| getWorkerCount()
-                | StopWorker(shardId, reply) -> 
+                           shardProcessorCountChangedEvent.Trigger <| getShardProcessorCount()
+                | StopShardProcessor(shardId, reply) -> 
                     match workingShards.TryGetValue(shardId) with
-                    | true, Started worker -> 
-                        worker.Stop()
+                    | true, Started shardProcessor -> 
+                        shardProcessor.Stop()
                         reply.Reply()
                     | _ -> reply.Reply()
-                | RemoveWorker(shardId, reason) -> 
+                | RemoveShardProcessor(shardId, reason) -> 
                     workingShards.[shardId] <- Stopped reason
-                    workerCountChangedEvent.Trigger <| getWorkerCount()
+                    shardProcessorCountChangedEvent.Trigger <| getShardProcessorCount()
                 | AddKnownShard(shardId, reply) ->
                     if not <| knownShards.ContainsKey(shardId) then knownShards.Add(shardId, false)
                     reply.Reply()
@@ -481,12 +481,12 @@ and ReactoKinesixApp private (awsKey     : string,
         }
     let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn "Controller agent was restarted due to exception :\n {0}" [| exn |])
 
-    let startWorker shardId   = controller.PostAndAsyncReply(fun reply -> StartWorker(shardId, reply))
-    let stopWorker  shardId   = controller.PostAndAsyncReply(fun reply -> StopWorker(shardId, reply))
+    let startShardProcessor shardId = controller.PostAndAsyncReply(fun reply -> StartShardProcessor(shardId, reply))
+    let stopShardProcessor  shardId = controller.PostAndAsyncReply(fun reply -> StopShardProcessor(shardId, reply))
     let addKnownShard shardId = controller.PostAndAsyncReply(fun reply -> AddKnownShard(shardId, reply))
     let markAsClosed shardId  = controller.PostAndAsyncReply(fun reply -> MarkAsClosed(shardId, reply))
 
-    let updateWorkers (shardIds : string seq) (update : ShardId -> Async<unit>) = 
+    let updateShardProcessors (shardIds : string seq) (update : ShardId -> Async<unit>) = 
         async {
             do! shardIds                
                 |> Seq.map (fun shardId -> update (ShardId shardId))
@@ -506,16 +506,16 @@ and ReactoKinesixApp private (awsKey     : string,
             if newShards.Count > 0 then
                 let logArgs : obj[] = [| newShards.Count; String.Join(",", newShards) |]
                 logInfo "Add [{0}] shards to known shards : [{1}]" logArgs
-                do! updateWorkers newShards addKnownShard
+                do! updateShardProcessors newShards addKnownShard
 
-                logInfo "Starting workers for [{0}] shards : [{1}]" logArgs
-                do! updateWorkers newShards startWorker
+                logInfo "Starting shard processors for [{0}] shards : [{1}]" logArgs
+                do! updateShardProcessors newShards startShardProcessor
        }
        
     let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
                       .Subscribe(fun _ -> 
                             stateTableReadyEvent.Trigger(tableName.ToString())
-                            logDebug "State table [{0}] is ready, initializing workers..." [| tableName |]
+                            logDebug "State table [{0}] is ready, initializing shard processors..." [| tableName |]
                             Async.Start(checkStreamChanges, cts.Token))
 
     let refreshSub = runScheduledTask config.CheckStreamChangesFrequency checkStreamChanges
@@ -537,13 +537,13 @@ and ReactoKinesixApp private (awsKey     : string,
             if shardsToCheck.Length > 0 then
                 let logArgs : obj[] = [| shardsToCheck.Length; String.Join(",", shardsToCheck) |]
                 logInfo "Found [{0}] shards that are not closed and not processed by this worker : [{1}]" logArgs                        
-                logInfo "Starting workers for [{0}] shards : [{1}]" logArgs
-                do! updateWorkers shardsToCheck startWorker
+                logInfo "Starting shard processors for [{0}] shards : [{1}]" logArgs
+                do! updateShardProcessors shardsToCheck startShardProcessor
         }
 
     let checkUnprocessedSub = runScheduledTask config.CheckUnprocessedShardsFrequency checkUnprocessed
 
-    let workCountSub = workerCountChangedEvent.Publish.Subscribe(fun n -> logDebug "Worker count changed to [{0}]" [| n |])
+    let shardProcessorCountSub = shardProcessorCountChangedEvent.Publish.Subscribe(fun n -> logDebug "Shard Processor count changed to [{0}]" [| n |])
 
     let disposeInvoked = ref 0
     let cleanup (disposing : bool) =
@@ -553,23 +553,23 @@ and ReactoKinesixApp private (awsKey     : string,
 
             refreshSub.Dispose()
 
-            let workerCount = getWorkerCount()
-            if workerCount > 0 then
-                logDebug "Stopping all [{0}] workers..." [| workerCount |]
+            let shardProcessorCount = getShardProcessorCount()
+            if shardProcessorCount > 0 then
+                logDebug "Stopping all [{0}] shard processor..." [| shardProcessorCount |]
 
                 workingShards 
                 |> Seq.choose (fun (KeyValue(shardId, workingShard)) -> 
                     match workingShard with | Started _ -> Some shardId | _ -> None) 
-                |> Seq.map stopWorker
+                |> Seq.map stopShardProcessor
                 |> Async.Parallel
                 |> Async.Ignore
                 |> Async.Start
                 
-                workerCountChangedEvent.Publish.Where(fun n -> n = 0).Take(1).Wait() |> ignore
+                shardProcessorCountChangedEvent.Publish.Where(fun n -> n = 0).Take(1).Wait() |> ignore
 
-                logDebug "Workers stopped..." [||]
+                logDebug "Shard processors stopped..." [||]
             
-            workCountSub.Dispose()
+            shardProcessorCountSub.Dispose()
 
             cts.Cancel()
             cts.Dispose()
@@ -587,15 +587,15 @@ and ReactoKinesixApp private (awsKey     : string,
     member internal this.Processor  = processor
     
     member internal this.MarkAsClosed shardId   = markAsClosed shardId |> ignore
-    member internal this.StopProcessing shardId = stopWorker shardId   |> ignore
+    member internal this.StopProcessing shardId = stopShardProcessor shardId   |> ignore
 
     static member CreateNew(awsKey, awsSecret, region, appName, streamName, workerId, processor, ?config) =
         let config = defaultArg config <| new ReactoKinesixConfig()
         new ReactoKinesixApp(awsKey, awsSecret, region, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
 
     interface IReactoKinesixApp with
-        member this.StartProcessing (shardId : string) = startWorker (ShardId shardId) |> Async.StartAsPlainTask
-        member this.StopProcessing  (shardId : string) = stopWorker  (ShardId shardId) |> Async.StartAsPlainTask
+        member this.StartProcessing (shardId : string) = startShardProcessor (ShardId shardId) |> Async.StartAsPlainTask
+        member this.StopProcessing  (shardId : string) = stopShardProcessor  (ShardId shardId) |> Async.StartAsPlainTask
         member this.ChangeProcessor newProcessor       = processor <- newProcessor
 
     interface IDisposable with

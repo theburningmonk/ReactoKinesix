@@ -64,7 +64,7 @@ module Exceptions =
     /// Thrown when trying to get records from a closed shard whose records have been exhausted
     exception ShardCannotBeIteratedException
 
-    /// Thrown when trying to initialize a worker but its shard cannot be found in the DynamoDB
+    /// Thrown when trying to initialize a shard processor but its shard cannot be found in the DynamoDB
     exception ShardNotFoundException
 
 [<AutoOpen>]
@@ -126,15 +126,15 @@ module internal InternalModel =
     type ProcessResult  = Result<SequenceNumber, SequenceNumber * Exception>
     
     type internal StoppedReason =
-        | UserTriggered          = 1    // worker was stopped by a user
-        | ShardClosed            = 2    // worker has stopped because its shard was closed
-        | ConditionalCheckFailed = 3    // worker has stopped because its shard was taken over by another worker
-        | ErrorInduced           = 4    // worker has stopped because of an error in processing records and the error handling mode is to stop
-        | ProcessedByOther       = 5    // worker has stopped because the shard is processed by another worker
+        | UserTriggered          = 1    // shard processor was stopped by a user
+        | ShardClosed            = 2    // shard processor has stopped because its shard was closed
+        | ConditionalCheckFailed = 3    // shard processor has stopped because its shard was taken over by another worker
+        | ErrorInduced           = 4    // shard processor has stopped because of an error in processing records and the error handling mode is to stop
+        | ProcessedByOther       = 5    // shard processor has stopped because the shard is processed by another worker
 
     type ControlMessage =
-        | StartWorker       of ShardId * AsyncReplyChannel<unit>
-        | StopWorker        of ShardId * AsyncReplyChannel<unit>
-        | RemoveWorker      of ShardId * StoppedReason
-        | AddKnownShard     of ShardId * AsyncReplyChannel<unit>
-        | MarkAsClosed      of ShardId * AsyncReplyChannel<unit>
+        | StartShardProcessor   of ShardId * AsyncReplyChannel<unit>
+        | StopShardProcessor    of ShardId * AsyncReplyChannel<unit>
+        | RemoveShardProcessor  of ShardId * StoppedReason
+        | AddKnownShard         of ShardId * AsyncReplyChannel<unit>
+        | MarkAsClosed          of ShardId * AsyncReplyChannel<unit>
