@@ -44,6 +44,20 @@ type ReactoKinesixConfig () =
     /// How frequently should we check for shards whose worker has died. Default is 1 minute.
     member val CheckUnprocessedShardsFrequency = TimeSpan.FromMinutes(1.0) with get, set
 
+/// Represents a record received from the stream
+type Record = 
+    {
+        SequenceNumber  : string
+        Data            : byte[]
+        PartitionKey    : string
+    }
+    static member op_Explicit (record : Amazon.Kinesis.Model.Record) =
+        {
+            SequenceNumber = record.SequenceNumber
+            Data           = record.Data.ToArray()
+            PartitionKey   = record.PartitionKey
+        }
+
 [<AutoOpen>]
 module Exceptions =
     /// Thrown when the configuration specifies a heartbeat frequence that's greater than the heartbeat timeout

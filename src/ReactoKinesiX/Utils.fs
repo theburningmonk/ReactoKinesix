@@ -39,6 +39,8 @@ module internal Utils =
             let msg = String.Format(format, args)
             logger.Error(msg, exn)
 
+    let inline (!>) (b : ^b) : ^a = (^a : (static member op_Explicit : ^b -> ^a) (b)) 
+
     let withRetry n f =
         let rec loop n = try f() with | _ -> if n = 0 then reraise() else loop (n - 1)
 
@@ -194,7 +196,7 @@ module internal KinesisUtils =
                 | Success res -> 
                     logDebug "Received [{0}] records from stream [{1}], shard [{2}]"
                              [| res.Records.Count; streamName; shardId |]
-                    return Success(res.NextShardIterator, res.Records :> Record seq)
+                    return Success(res.NextShardIterator, res.Records |> Seq.map (fun r -> !> r : Record) |> Seq.toArray)
                 | Failure exn ->
                     logError exn "Failed to get records from stream [{0}], shard [{1}]" [| streamName; shardId |]
                     return Failure(exn) 

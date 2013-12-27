@@ -59,9 +59,9 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     do logDebug "Starting shard processor..." [||]
 
-    let batchReceivedEvent          = new Event<Iterator * Record seq>() // when a new batch of records have been received
-    let recordProcessedEvent        = new Event<Record>()                // when a record has been processed by processor
-    let batchProcessedEvent         = new Event<int * Iterator>()        // when a batch has finished processing with the iterator for next batch
+    let batchReceivedEvent          = new Event<Iterator * Record[]>()  // when a new batch of records have been received
+    let recordProcessedEvent        = new Event<Record>()               // when a record has been processed by processor
+    let batchProcessedEvent         = new Event<int * Iterator>()       // when a batch has finished processing with the iterator for next batch
 
     let initializedEvent            = new Event<unit>()           // when the shard processor has been initialized
     let initializationFailedEvent   = new Event<Exception>()      // when an error was caught whist initializing the shard processor
@@ -152,10 +152,10 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 let! getRecordsResult = KinesisUtils.getRecords app.Kinesis app.Config app.StreamName shardId iterator
                 match getRecordsResult with
                 | Success(nextIterator, batch) when nextIterator = null -> 
-                    logDebug "Received batch of [{0}] records, no more records will be available (end of shard)" [| Seq.length batch |]
+                    logDebug "Received batch of [{0}] records, no more records will be available (end of shard)" [| batch.Length |]
                     batchReceivedEvent.Trigger(EndOfShard, batch)
                 | Success(nextIterator, batch) -> 
-                    logDebug "Received batch of [{0}] records, next iterator [{1}]" [| Seq.length batch; iterator |]
+                    logDebug "Received batch of [{0}] records, next iterator [{1}]" [| batch.Length; iterator |]
                     batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
                 | Failure(exn) -> 
                     match exn with
@@ -209,8 +209,8 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 // return failure so to defer to the fetch->process->checkpoint loop to not continue any further
                 Failure(SequenceNumber record.SequenceNumber, exn)
 
-    let processBatch (iterator, records) =
-        let recordCount = Seq.length records
+    let processBatch (iterator, records : Record[]) =
+        let recordCount = records.Length
         logDebug "Start processing batch of [{0}] records, next iterator [{1}]" [| recordCount; iterator |]
 
         match recordCount with

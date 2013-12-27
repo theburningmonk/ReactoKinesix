@@ -66,7 +66,7 @@ let appName		= "TestApp"
 let streamName	= "TestStream"
 
 let act (record : Record) =
-    use streamReader = new StreamReader(record.Data)
+    let msg = System.Encoding.UTF8.GetString(record.Data)
     printfn """
 
 =================================================
@@ -77,7 +77,7 @@ let act (record : Record) =
 =================================================
 =================================================
 
-"""         record.SequenceNumber <| streamReader.ReadToEnd()    
+"""         record.SequenceNumber msg  
 
 let processor = { new IRecordProcessor with 
                     member this.Process record = act record

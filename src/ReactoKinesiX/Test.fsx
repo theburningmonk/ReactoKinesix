@@ -40,14 +40,13 @@ let putRecord (payload : string) =
     kinesis.PutRecord(req) |> ignore
 
 let act (record : Record) =
-    record.Data.Position <- 0L
-    use streamReader = new StreamReader(record.Data, Encoding.UTF8, true, 1024, true)
-    printfn "\n\n\n\n\n\n\n\n\n\n%s : %s\n\n\n\n\n\n\n\n\n\n" record.SequenceNumber <| streamReader.ReadToEnd()
+    let msg = Encoding.UTF8.GetString(record.Data)
+    printfn "\n\n\n\n\n\n\n\n\n\n%s : %s\n\n\n\n\n\n\n\n\n\n" record.SequenceNumber msg
     
     failwith "oops"
 
 let act2 (record : Record) =
-    use streamReader = new StreamReader(record.Data)
+    let msg = Encoding.UTF8.GetString(record.Data)
     printfn """
 
 =================================================
@@ -58,7 +57,7 @@ let act2 (record : Record) =
 =================================================
 =================================================
 
-"""         record.SequenceNumber <| streamReader.ReadToEnd()
+"""         record.SequenceNumber <| msg
     
 
 let act3 (record : Record) =
