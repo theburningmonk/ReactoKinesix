@@ -12,10 +12,10 @@ type ErrorHandlingMode =
     | RetryAndStop      of int
 
 type ReactoKinesixConfig () = 
-    /// Read throughput to read for the DynamoDB table. Default is 10.
+    /// Read throughput to use for the DynamoDB table. Default is 10.
     member val DynamoDBReadThroughput  = 10L with get, set
 
-    /// Write throughput to read for the DynamoDB table. Default is 10.
+    /// Write throughput to use for the DynamoDB table. Default is 10.
     member val DynamoDBWriteThroughput = 10L with get, set
 
     /// Suffix used to name your application's state table in DynamoDB. Default is "KinesisState"
@@ -38,7 +38,7 @@ type ReactoKinesixConfig () =
     /// Maximum number of retries on Kinesis operations. Default is 3.
     member val MaxKinesisRetries       = 3 with get, set
 
-    /// How frequenty should we check for shard merges/splits in the stream. Default is 1 minute.
+    /// How frequently should we check for shard merges/splits in the stream. Default is 1 minute.
     member val CheckStreamChangesFrequency  = TimeSpan.FromMinutes(1.0) with get, set
 
     /// How frequently should we check for shards whose worker has died. Default is 1 minute.
