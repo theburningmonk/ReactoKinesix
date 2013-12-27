@@ -181,6 +181,8 @@ Whilst you don't need to specify a configuration when creating a new client appl
 
 If you need to use a different configuration to the default, then simply create an instance of `ReactoKinesixConfig` with the configurations you want and pass it into the `ReactoKinesixApp.CreateNew` when creating your client application.
 
+**Note**: if you know that your application will use a **large number** of *shards* and worker nodes then you will want to **increase the read and write throughput** for the *DynamoDB* table otherwise database operations are likely to be throttled on a regular basis and **cause delays in processing your records**. 
+
 #### Distributed processing
 
 Coming soon.
