@@ -138,3 +138,4 @@ module internal InternalModel =
         | RemoveShardProcessor  of ShardId * StoppedReason
         | AddKnownShard         of ShardId * AsyncReplyChannel<unit>
         | MarkAsClosed          of ShardId * AsyncReplyChannel<unit>
+        | RemoveKnownShard      of ShardId * AsyncReplyChannel<unit>

@@ -478,12 +478,16 @@ and ReactoKinesixApp private (awsKey     : string,
                 | MarkAsClosed(shardId, reply) ->
                     knownShards.[shardId] <- true
                     reply.Reply()
+                | RemoveKnownShard(shardId, reply) ->
+                    knownShards.Remove(shardId) |> ignore
+                    reply.Reply()
         }
     let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn "Controller agent was restarted due to exception :\n {0}" [| exn |])
 
     let startShardProcessor shardId = controller.PostAndAsyncReply(fun reply -> StartShardProcessor(shardId, reply))
     let stopShardProcessor  shardId = controller.PostAndAsyncReply(fun reply -> StopShardProcessor(shardId, reply))
     let addKnownShard shardId = controller.PostAndAsyncReply(fun reply -> AddKnownShard(shardId, reply))
+    let rmvKnownShard shardId = controller.PostAndAsyncReply(fun reply -> RemoveKnownShard(shardId, reply))
     let markAsClosed shardId  = controller.PostAndAsyncReply(fun reply -> MarkAsClosed(shardId, reply))
 
     let updateShardProcessors (shardIds : string seq) (update : ShardId -> Async<unit>) = 
@@ -502,6 +506,7 @@ and ReactoKinesixApp private (awsKey     : string,
 
             let knownShards = knownShards.Keys |> Seq.map (fun (ShardId shardId) -> shardId) |> Set.ofSeq
             let newShards   = Set.difference shardIds knownShards
+            let rmvShards   = Set.difference knownShards shardIds
 
             if newShards.Count > 0 then
                 let logArgs : obj[] = [| newShards.Count; String.Join(",", newShards) |]
@@ -510,6 +515,10 @@ and ReactoKinesixApp private (awsKey     : string,
 
                 logInfo "Starting shard processors for [{0}] shards : [{1}]" logArgs
                 do! updateShardProcessors newShards startShardProcessor
+
+            if rmvShards.Count > 0 then
+                logInfo "Remove [{0}] shards from known shards : [{1}]" [| rmvShards.Count; String.Join(",", rmvShards) |]
+                do! updateShardProcessors newShards rmvKnownShard
        }
        
     let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
