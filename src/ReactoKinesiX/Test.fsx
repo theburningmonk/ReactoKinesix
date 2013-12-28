@@ -79,6 +79,7 @@ let processor2 = { new IRecordProcessor with
 
 let app = ReactoKinesixApp.CreateNew(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM", processor)
 
+
 app.StartProcessing("shardId-000000000003")
 app.StartProcessing("shardId-000000000004")
 app.StopProcessing("shardId-000000000003")
@@ -90,4 +91,4 @@ app.StopProcessing("shardId-000000000004")
 (app :> IDisposable).Dispose()
 
 
-let app2 = ReactoKinesixApp.CreateNew(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM-2", processor2)
+let app2 = ReactoKinesixApp.CreateNew(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM", processor2)

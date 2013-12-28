@@ -20,6 +20,9 @@ open Amazon.Kinesis.Model
 open ReactoKinesix.Model
 open ReactoKinesix.Utils
 
+type OnInitializedDelegate    = delegate of obj * EventArgs -> unit
+type OnBatchProcessedDelegate = delegate of obj * EventArgs -> unit
+
 /// Represents a processor that is responsible for processing any records received from the stream.
 type IRecordProcessor = 
     /// Process a record
@@ -36,14 +39,22 @@ type IRecordProcessor =
 type IReactoKinesixApp =
     inherit IDisposable
 
+    /// Fired when the application has been initialized
+    [<CLIEvent>]
+    abstract member OnInitialized    : IEvent<OnInitializedDelegate, EventArgs>
+
+    /// Fired when a batch of records have been successfully processed
+    [<CLIEvent>]
+    abstract member OnBatchProcessed : IEvent<OnBatchProcessedDelegate, EventArgs>
+
     /// Force the application to try and start processing a particular shard
-    abstract member StartProcessing : shardId : string -> Task
+    abstract member StartProcessing  : shardId : string -> Task
 
     /// Force the application to stop processing a particuar shard
-    abstract member StopProcessing  : shardId : string -> Task
+    abstract member StopProcessing   : shardId : string -> Task
 
     /// Change the processor that will be used to process received records
-    abstract member ChangeProcessor : newProcessor : IRecordProcessor -> unit
+    abstract member ChangeProcessor  : newProcessor : IRecordProcessor -> unit
 
 type internal WorkingShard =
     | Started   of ReactoKinesixShardProcessor
@@ -56,8 +67,13 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
     let logInfo     = logInfo  logger
     let logWarn     = logWarn  logger
     let logError    = logError logger
+    
+    let disposeInvoked = ref 0
+    let cts = new CancellationTokenSource();
 
     do logDebug "Starting shard processor..." [||]
+
+    //#region Events
 
     let batchReceivedEvent          = new Event<Iterator * Record[]>()  // when a new batch of records have been received
     let recordProcessedEvent        = new Event<Record>()               // when a record has been processed by processor
@@ -75,8 +91,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
     let stopProcessingEvent         = new Event<StoppedReason>()  // when the shard processor is trying to stop processing of any further records
     let stoppedEvent                = new Event<StoppedReason>()  // when the shard processor has completed stopped
     
-    let disposeInvoked = ref 0
-    let cts = new CancellationTokenSource();
+    //#endregion
 
     let updateHeartbeat _ = 
         let work = 
@@ -249,6 +264,23 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
         updateIsClosed()
         app.MarkAsClosed(shardId)
         stoppedEvent.Trigger(StoppedReason.ShardClosed)
+                 
+    let checkPendingHandoverRequest =
+        async {
+            let! res = DynamoDBUtils.getHandoverRequest app.DynamoDB app.Config app.TableName shardId
+            match res with            
+            | Failure exn  -> logError exn "Failed to check for pending handover requests" [||]
+            | Success None -> logDebug "No pending handover request found" [||]
+            | Success (Some { ToWorker = toWorker; Expiry = expiry }) -> 
+                logDebug "Received handover request to give control of shard to worker [{0}], request expiry at [{1}]" [| toWorker; expiry |]
+
+                // if the request is still valid, then stop processing this shard
+                if DateTime.UtcNow <= expiry 
+                then stopProcessingEvent.Trigger(StoppedReason.HandedOver)
+                else logDebug "Ignoring request as it has already expired" [||]                    
+        }
+
+    //#region Event compositions and subscriptions
 
     // stop processing anymore records if we encountered conditional check errors (indicative of another worker having taken over
     // control of the shard from us), or if we were explicitly told to stop (indicated by the stoppingProcessingEvent)
@@ -319,27 +351,16 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 .CombineLatest(stopPoints, fun reason _ -> reason)
                 .Take(1)
                 .Subscribe(fun reason -> stoppedEvent.Trigger reason)
-                    
-    let checkPendingHandoverRequest =
-        async {
-            let! res = DynamoDBUtils.getHandoverRequest app.DynamoDB app.Config app.TableName shardId
-            match res with            
-            | Failure exn  -> logError exn "Failed to check for pending handover requests" [||]
-            | Success None -> logDebug "No pending handover request found" [||]
-            | Success (Some { ToWorker = toWorker; Expiry = expiry }) -> 
-                logDebug "Received handover request to give control of shard to worker [{0}], request expiry at [{1}]" [| toWorker; expiry |]
-
-                // if the request is still valid, then stop processing this shard
-                if DateTime.UtcNow <= expiry 
-                then stopProcessingEvent.Trigger(StoppedReason.HandedOver)
-                else logDebug "Ignoring request as it has already expired" [||]                    
-        }
-
+       
     let _ = Observable
                 .Interval(app.Config.CheckPendingHandoverRequestFrequency)
                 .SkipUntil(initializedEvent.Publish)
                 .TakeUntil(stopProcessing)
                 .Subscribe(fun _ -> Async.Start(checkPendingHandoverRequest, cts.Token))
+                
+    //#endregion
+
+    //#region Initialization
 
     // this is the initialization sequence
     let init = 
@@ -413,6 +434,8 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     do Async.Start(init, cts.Token)
 
+    //#endregion
+
     let cleanup (disposing : bool) =
         // ensure that resources are only disposed of once
         if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
@@ -425,7 +448,8 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
             logDebug "Disposed." [||]
 
-    [<CLIEvent>] member this.OnStopped = stoppedEvent.Publish
+    [<CLIEvent>] member this.OnBatchProcessed = batchProcessedEvent.Publish
+    [<CLIEvent>] member this.OnStopped        = stoppedEvent.Publish
 
     member this.Stop () = stopProcessingEvent.Trigger StoppedReason.UserTriggered
 
@@ -465,14 +489,27 @@ and ReactoKinesixApp private (awsKey     : string,
 
     let cts = new CancellationTokenSource()
 
-    let initializedEvent                = new Event<TableName>() // when the state able is confirmed to be ready
-    let shardProcessorCountChangedEvent = new Event<int>()       // when the number of shard processors have changed
+    let initializedEvent                = new Event<OnInitializedDelegate, EventArgs>()
+    let batchProcessedEvent             = new Event<OnBatchProcessedDelegate, EventArgs>()
+    let shardProcessorCountChangedEvent = new Event<int>()  // when the number of shard processors have changed
 
     let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
     let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)    
     let streamName, workerId = StreamName streamName, WorkerId workerId
     let tableName            = TableName <| sprintf "%s%s" appName config.DynamoDBTableSuffix
     let mutable processor    = processor
+    
+    let runScheduledTask freq job = Observable.Interval(freq).Subscribe(fun _ -> Async.Start(job, cts.Token))
+        
+    let updateShardProcessors (shardIds : string seq) (update : ShardId -> Async<unit>) = 
+        async {
+            do! shardIds                
+                |> Seq.map (fun shardId -> update (ShardId shardId))
+                |> Async.Parallel
+                |> Async.Ignore
+        }
+
+    //#region Initialization
 
     let initTable () = 
        match DynamoDBUtils.initStateTable dynamoDB config tableName with
@@ -480,7 +517,9 @@ and ReactoKinesixApp private (awsKey     : string,
        | Failure exn -> raise <| InitializationFailedException exn
     do initTable |> withRetry 3
 
-    let runScheduledTask freq job = Observable.Interval(freq).Subscribe(fun _ -> Async.Start(job, cts.Token))
+    //#endregion
+
+    //#region Agent that tracks known shards and shard processors
 
     // this is a mutable dictionary of shard processor but can only be mutated from within the controller agent
     // which is single threaded by nature so there's no need for placing locks around add/remove operations
@@ -499,6 +538,7 @@ and ReactoKinesixApp private (awsKey     : string,
                     | _ -> let shardProcessor = new ReactoKinesixShardProcessor(this, shardId)
                            workingShards.[shardId] <- Started shardProcessor
                            shardProcessor.OnStopped.Add(fun reason -> inbox.Post <| RemoveShardProcessor(shardId, reason))
+                           shardProcessor.OnBatchProcessed.Add(fun _ -> batchProcessedEvent.Trigger(this, new EventArgs()))
                            reply.Reply()
                            shardProcessorCountChangedEvent.Trigger <| getShardProcessorCount()
                 | StopShardProcessor(shardId, reply) -> 
@@ -528,13 +568,9 @@ and ReactoKinesixApp private (awsKey     : string,
     let rmvKnownShard shardId = controller.PostAndAsyncReply(fun reply -> RemoveKnownShard(shardId, reply))
     let markAsClosed shardId  = controller.PostAndAsyncReply(fun reply -> MarkAsClosed(shardId, reply))
 
-    let updateShardProcessors (shardIds : string seq) (update : ShardId -> Async<unit>) = 
-        async {
-            do! shardIds                
-                |> Seq.map (fun shardId -> update (ShardId shardId))
-                |> Async.Parallel
-                |> Async.Ignore
-        }
+    //#endregion
+
+    //#region Monitor sharding changes in the stream
 
     // look for changes to the stream compared to the shards we know about
     let checkStreamChanges =
@@ -562,11 +598,15 @@ and ReactoKinesixApp private (awsKey     : string,
        
     let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
                       .Subscribe(fun _ -> 
-                            initializedEvent.Trigger(tableName)
+                            initializedEvent.Trigger(this, new EventArgs())
                             logDebug "State table [{0}] is ready, initializing shard processors..." [| tableName |]
                             Async.Start(checkStreamChanges, cts.Token))
 
     let refreshSub = runScheduledTask config.CheckStreamChangesFrequency checkStreamChanges
+
+    //#endregion
+
+    //#region Monitor shards that aren't processed by any worker
 
     // look for shards that are not being processed by any worker
     let checkUnprocessed =
@@ -593,7 +633,9 @@ and ReactoKinesixApp private (awsKey     : string,
 
     let checkUnprocessedSub = runScheduledTask config.CheckUnprocessedShardsFrequency checkUnprocessed
 
-    let shardProcessorCountSub = shardProcessorCountChangedEvent.Publish.Subscribe(fun n -> logDebug "Shard Processor count changed to [{0}]" [| n |])
+    //#endregion
+
+    //#region Managing load balancing
 
     let issueHandoverRequest fromWorkerId shardId =
         async {
@@ -655,6 +697,10 @@ and ReactoKinesixApp private (awsKey     : string,
     let proactiveShareLoadSub = shardProcessorCountChangedEvent.Publish
                                     .Where((=) 0)
                                     .Subscribe(fun _ -> Async.Start(shareLoad, cts.Token))
+    
+    //#endregion
+
+    let shardProcessorCountSub = shardProcessorCountChangedEvent.Publish.Subscribe(fun n -> logDebug "Shard Processor count changed to [{0}]" [| n |])
 
     let disposeInvoked = ref 0
     let cleanup (disposing : bool) =
@@ -707,6 +753,9 @@ and ReactoKinesixApp private (awsKey     : string,
         new ReactoKinesixApp(awsKey, awsSecret, region, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
 
     interface IReactoKinesixApp with
+        [<CLIEvent>] member this.OnInitialized    = initializedEvent.Publish
+        [<CLIEvent>] member this.OnBatchProcessed = batchProcessedEvent.Publish
+
         member this.StartProcessing (shardId : string) = startShardProcessor (ShardId shardId) |> Async.StartAsPlainTask
         member this.StopProcessing  (shardId : string) = stopShardProcessor  (ShardId shardId) |> Async.StartAsPlainTask
         member this.ChangeProcessor newProcessor       = processor <- newProcessor
