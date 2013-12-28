@@ -264,6 +264,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     let _       = Observable
                     .Interval(app.Config.Heartbeat)
+                    .SkipUntil(initializedEvent.Publish)
                     .TakeUntil(stopped)
                     .Subscribe(updateHeartbeat)
 
@@ -318,12 +319,50 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 .CombineLatest(stopPoints, fun reason _ -> reason)
                 .Take(1)
                 .Subscribe(fun reason -> stoppedEvent.Trigger reason)
+                    
+    let checkPendingHandoverRequest =
+        async {
+            let! res = DynamoDBUtils.getHandoverRequest app.DynamoDB app.Config app.TableName shardId
+            match res with            
+            | Failure exn  -> logError exn "Failed to check for pending handover requests" [||]
+            | Success None -> logDebug "No pending handover request found" [||]
+            | Success (Some { ToWorker = toWorker; Expiry = expiry }) -> 
+                logDebug "Received handover request to give control of shard to worker [{0}], request expiry at [{1}]" [| toWorker; expiry |]
+
+                // if the request is still valid, then stop processing this shard
+                if DateTime.UtcNow <= expiry 
+                then stopProcessingEvent.Trigger(StoppedReason.HandedOver)
+                else logDebug "Ignoring request as it has already expired" [||]                    
+        }
+
+    let _ = Observable
+                .Interval(app.Config.CheckPendingHandoverRequestFrequency)
+                .SkipUntil(initializedEvent.Publish)
+                .TakeUntil(stopProcessing)
+                .Subscribe(fun _ -> Async.Start(checkPendingHandoverRequest, cts.Token))
 
     // this is the initialization sequence
     let init = 
         let getIterator = function
             | Some seqNum -> NoIteratorToken <| AfterSequenceNumber seqNum
             | _ -> NoIteratorToken TrimHorizon            
+
+        let takeOver fromWorkerId seqNum =
+            async {
+                // claim ownership of the shard by successfully updating the row
+                try
+                    do! DynamoDBUtils.updateWorkerId app.WorkerId app.DynamoDB app.TableName fromWorkerId shardId
+
+                    logDebug "Successfully taken over responsibility for the shard" [||]
+
+                    // the shard has not been processed currently, start from the last checkpoint
+                    Async.Start(fetchNextRecords <| getIterator seqNum, cts.Token)
+                    initializedEvent.Trigger()
+                with
+                | :? ConditionalCheckFailedException ->
+                    conditionalCheckFailedEvent.Trigger()
+                | exn -> initializationFailedEvent.Trigger(exn)
+            }
 
         async {
             let! createShardResult = DynamoDBUtils.createShard app.DynamoDB app.TableName app.WorkerId shardId
@@ -335,38 +374,36 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 | Failure exn -> initializationFailedEvent.Trigger(exn)
                 | Success status -> 
                     match status with
-                    | NotFound -> 
-                        logWarn "Shard is not found. Please check if it was manually deleted from DynamoDB." [||]
-                        initializationFailedEvent.Trigger(ShardNotFoundException)
-                    | Closed   -> shardClosedEvent.Trigger()
-                    | NotProcessing(workerId', heartbeat, seqNum) -> 
+                    | NotFound _ -> logWarn "Shard is not found. Please check if it was manually deleted from DynamoDB." [||]
+                                    initializationFailedEvent.Trigger(ShardNotFoundException)
+                    | Closed _   -> shardClosedEvent.Trigger()
+                    | NotProcessing(_, workerId', heartbeat, seqNum) -> 
                         logDebug "Taking over shard which was processed by worker [{0}], last heartbeat [{1}] and checkpoint [{2}]"
                                  [| workerId'; heartbeat; seqNum |]
+                        do! takeOver workerId' seqNum
 
-                        // claim ownership of the shard by successfully updating the row
-                        try
-                            do! DynamoDBUtils.updateWorkerId app.WorkerId app.DynamoDB app.TableName workerId' shardId
+                    | HandingOver(_, fromWorker', toWorker', seqNum) when toWorker' = app.WorkerId ->
+                        logDebug "Accepting shard handover from worker [{0}]" [| fromWorker' |]
+                        do! takeOver fromWorker' seqNum
+                    | HandingOver(_, fromWorker', toWorker', _) ->
+                        logDebug "Shard is being handed over from worker [{0}] to worker [{1}]" [| fromWorker'; toWorker' |]
+                        stoppedEvent.Trigger(StoppedReason.ProcessedByOther)
 
-                            logDebug "Successfully taken over responsibility for the shard" [||]
+                    | Processing(_, workerId', seqNum, _) when workerId' <> app.WorkerId ->
+                        // the shard is being processed by another worker, for now, give up
+                        logDebug "Shard is currently being processed by worker [{0}], last checkpoint [{1}], retiring." [| workerId'; seqNum |]
+                        stoppedEvent.Trigger(StoppedReason.ProcessedByOther)                    
+                    | Processing(_, workerId', seqNum, Some { FromWorker = fromWorker; ToWorker = toWorker })
+                        when workerId' = app.WorkerId && WorkerId fromWorker = app.WorkerId ->
 
-                            // the shard has not been processed currently, start from the last checkpoint
-                            Async.Start(fetchNextRecords <| getIterator seqNum, cts.Token)
-                            initializedEvent.Trigger()
-                        with
-                        | :? ConditionalCheckFailedException ->
-                            conditionalCheckFailedEvent.Trigger()
-                        | exn -> initializationFailedEvent.Trigger(exn)
-
-                    | Processing(workerId', seqNum) when workerId' = app.WorkerId -> 
+                        logDebug "Cannot resume processing of shard, handover request has been issued by worker [{0}]" [| toWorker |]
+                        stoppedEvent.Trigger(StoppedReason.HandedOver)
+                    | Processing(_, workerId', seqNum, _) -> 
                         logDebug "Resuming processing of shard, last checkpoint [{0}]" [| seqNum |]
 
                         // the shard was being processed by this worker, continue from where we left off
                         Async.Start(fetchNextRecords <| getIterator seqNum, cts.Token)
                         initializedEvent.Trigger()
-                    | Processing(workerId', seqNum) ->
-                        // the shard is being processed by another worker, for now, give up
-                        logDebug "Shard is currently being processed by worker [{0}], last checkpoint [{1}], retiring." [| workerId'; seqNum |]
-                        stoppedEvent.Trigger(StoppedReason.ProcessedByOther)
         }
 
     // keep retrying failed initializations until it succeeds
@@ -424,11 +461,12 @@ and ReactoKinesixApp private (awsKey     : string,
     let logDebug   = logDebug logger
     let logInfo    = logInfo  logger
     let logWarn    = logWarn  logger
+    let logError   = logError logger
 
     let cts = new CancellationTokenSource()
 
-    let stateTableReadyEvent            = new Event<string>()  // when the state able is confirmed to be ready
-    let shardProcessorCountChangedEvent = new Event<int>()     // when the number of shard processors have changed
+    let initializedEvent                = new Event<TableName>() // when the state able is confirmed to be ready
+    let shardProcessorCountChangedEvent = new Event<int>()       // when the number of shard processors have changed
 
     let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
     let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)    
@@ -498,6 +536,7 @@ and ReactoKinesixApp private (awsKey     : string,
                 |> Async.Ignore
         }
 
+    // look for changes to the stream compared to the shards we know about
     let checkStreamChanges =
         async {
             // find difference between the shards in the stream and the shards we're currenty processing
@@ -523,12 +562,13 @@ and ReactoKinesixApp private (awsKey     : string,
        
     let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
                       .Subscribe(fun _ -> 
-                            stateTableReadyEvent.Trigger(tableName.ToString())
+                            initializedEvent.Trigger(tableName)
                             logDebug "State table [{0}] is ready, initializing shard processors..." [| tableName |]
                             Async.Start(checkStreamChanges, cts.Token))
 
     let refreshSub = runScheduledTask config.CheckStreamChangesFrequency checkStreamChanges
 
+    // look for shards that are not being processed by any worker
     let checkUnprocessed =
         async {
             // only check against shards that was:
@@ -539,6 +579,7 @@ and ReactoKinesixApp private (awsKey     : string,
                                         match workingShard with 
                                         | Stopped StoppedReason.ProcessedByOther
                                         | Stopped StoppedReason.ConditionalCheckFailed
+                                        | Stopped StoppedReason.HandedOver
                                             -> Some shardId
                                         | _ -> None) 
                                 |> Seq.toArray
@@ -554,13 +595,70 @@ and ReactoKinesixApp private (awsKey     : string,
 
     let shardProcessorCountSub = shardProcessorCountChangedEvent.Publish.Subscribe(fun n -> logDebug "Shard Processor count changed to [{0}]" [| n |])
 
+    let issueHandoverRequest fromWorkerId shardId =
+        async {
+            let! res = DynamoDBUtils.issueHandoverRequest dynamoDB config tableName fromWorkerId workerId shardId
+            match res with
+            | Choice1Of2 ()  -> logDebug "Issued handover request to worker [{0}] for shard [{1}]" [| fromWorkerId; shardId |]
+            | Choice2Of2 exn -> logError exn "Failed to issued handover request to worker [{0}] for shard [{1}]" [| fromWorkerId; shardId |]
+        }
+
+    // look for workers whom have taken on too many shards and request to share their load to balance the load amongst the workers
+    let shareLoad =
+        async {
+            let! shardStatuses = DynamoDBUtils.getShardStatuses dynamoDB config tableName
+            match shardStatuses with
+            | Success statuses 
+                when statuses |> Array.exists (function | NotProcessing _ | HandingOver _ -> true | _ -> false) ->
+                    logDebug "There are shards not currently being processed in the stream, skip attempt to share load until all shards are being processed" [||]
+            | Success statuses ->
+                let shardsCount    = statuses.Length
+                let shardsByWorker = statuses 
+                                     |> Seq.groupBy (function | Processing(_, workerId', _, _)  -> workerId')
+                                     |> Map.ofSeq
+                let shardsCountByWorker = shardsByWorker
+                                          |> Seq.map (fun (KeyValue(workerId', seq)) -> workerId', Seq.length seq)
+                                          |> Seq.toArray
+                let myShardsCount  = shardsCountByWorker 
+                                     |> Array.tryPick (fun (workerId', count) -> if workerId' = workerId then Some count else None)
+                                     |> function | Some n -> n | _ -> 0               
+
+                // look for workers with at least 2 more shards than the current worker
+                let workersWithMoreLoad = shardsCountByWorker |> Array.filter (fun (_, count) -> count > myShardsCount + 1)
+
+                // whilst trying to ask other workers to hand over their shards, only do so as far as not to give the
+                // current worker more than the 
+                let maxTargetShards = workersWithMoreLoad |> Seq.map snd |> Seq.min
+                let shardsToTake    = min (maxTargetShards - myShardsCount) workersWithMoreLoad.Length
+                
+                // these are the workers whom we're going to ask to hand over one of their shards
+                let targetWorkers = workersWithMoreLoad 
+                                    |> Seq.sortBy (fun (_, count) -> -count)
+                                    |> Seq.take shardsToTake
+                                    |> Seq.map fst
+                                    |> Seq.toArray
+
+                logDebug "Attempting to request [{0}] workers to handover one of their shards : [{1}]" 
+                         [| targetWorkers.Length; String.Join(",", targetWorkers |> Seq.map (function WorkerId workerId -> workerId)) |]
+                
+                targetWorkers 
+                |> Array.iter (fun fromWorkerId -> 
+                    let shard = shardsByWorker.[fromWorkerId] |> Seq.head
+                    Async.Start(issueHandoverRequest fromWorkerId shard.ShardId, cts.Token))                
+            | Failure exn ->
+                logError exn "Failed to retrieve shard statuses from the state table [{0}]" [| tableName |]
+        }
+
+    let shareLoadSub = runScheduledTask config.LoadBalanceFrequency shareLoad
+
     let disposeInvoked = ref 0
     let cleanup (disposing : bool) =
         // ensure that resources are only disposed of once
         if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
             logDebug "Disposing..." [||]
-
+            
             refreshSub.Dispose()
+            shareLoadSub.Dispose()
 
             let shardProcessorCount = getShardProcessorCount()
             if shardProcessorCount > 0 then
@@ -596,7 +694,7 @@ and ReactoKinesixApp private (awsKey     : string,
     member internal this.Processor  = processor
     
     member internal this.MarkAsClosed shardId   = markAsClosed shardId |> ignore
-    member internal this.StopProcessing shardId = stopShardProcessor shardId   |> ignore
+    member internal this.StopProcessing shardId = stopShardProcessor shardId |> ignore
 
     static member CreateNew(awsKey, awsSecret, region, appName, streamName, workerId, processor, ?config) =
         let config = defaultArg config <| new ReactoKinesixConfig()

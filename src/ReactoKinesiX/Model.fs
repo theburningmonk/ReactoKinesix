@@ -44,6 +44,15 @@ type ReactoKinesixConfig () =
     /// How frequently should we check for shards whose worker has died. Default is 1 minute.
     member val CheckUnprocessedShardsFrequency = TimeSpan.FromMinutes(1.0) with get, set
 
+    /// How frequently should we try to balance the load amongst the workers. Defaut is 3 minutes.
+    member val LoadBalanceFrequency    = TimeSpan.FromMinutes(3.0) with get, set
+
+    /// How much time to allow a handover request to complete. Default is 10 minutes.
+    member val HandoverRequestExpiry   = TimeSpan.FromMinutes(10.0) with get, set
+
+    /// How frequently should we check for pending handover requests for a shard. Default is 1 minute.
+    member val CheckPendingHandoverRequestFrequency = TimeSpan.FromMinutes(1.0) with get, set
+
 /// Represents a record received from the stream
 type Record = 
     {
@@ -57,6 +66,14 @@ type Record =
             Data           = record.Data.ToArray()
             PartitionKey   = record.PartitionKey
         }
+
+/// Represents a handover request
+type HandoverRequest =
+    {
+        FromWorker  : string
+        ToWorker    : string
+        Expiry      : DateTime
+    }
 
 [<AutoOpen>]
 module Exceptions =
@@ -126,12 +143,20 @@ module internal InternalModel =
             | EndOfShard                -> "EndOfShard"
     
     type ShardStatus    = 
-        | NotFound      // the shard was not found
-        | Closed        // the shard was closed
+        | NotFound      of ShardId  // the shard was not found
+        | Closed        of ShardId  // the shard was closed
         // the shard is there but not currently being processed
-        | NotProcessing of WorkerId * DateTime * SequenceNumber option
+        | NotProcessing of ShardId * WorkerId * DateTime * SequenceNumber option
         // the shard is currently being processed by a worker
-        | Processing    of WorkerId * SequenceNumber option
+        | Processing    of ShardId * WorkerId * SequenceNumber option * HandoverRequest option
+        // the shard is being handed over from one worker to another
+        | HandingOver   of ShardId * WorkerId * WorkerId * SequenceNumber option
+        member this.ShardId =
+            match this with
+            | NotFound shardId | Closed shardId
+            | NotProcessing (shardId, _, _, _)
+            | Processing    (shardId, _, _, _)
+            | HandingOver   (shardId, _, _, _) -> shardId
 
     type Result<'Success, 'Failure> =
         | Success   of 'Success
@@ -145,6 +170,7 @@ module internal InternalModel =
         | ConditionalCheckFailed = 3    // shard processor has stopped because its shard was taken over by another worker
         | ErrorInduced           = 4    // shard processor has stopped because of an error in processing records and the error handling mode is to stop
         | ProcessedByOther       = 5    // shard processor has stopped because the shard is processed by another worker
+        | HandedOver             = 6    // shard processor has stopped because the shard has been handed over to another worker
 
     type ControlMessage =
         | StartShardProcessor   of ShardId * AsyncReplyChannel<unit>
