@@ -86,6 +86,10 @@ module Exceptions =
     /// Thrown when the configruation for MaxKinesisRetries is negative
     exception NegativeMaxKinesisRetriesConfigurationException of int
 
+    /// Thrown when the configuration specifies a handover request expiry that's insufficient given the 
+    /// HeartbeatTimeout, CheckPendingHandoverRequestFrequency and CheckUnprocessedShardsFrequency
+    exception InsufficientHandoverRequestExpiryException of TimeSpan
+
     /// Thorwn when initialization of the app failed with the attached inner exception
     exception InitializationFailedException of Exception
 

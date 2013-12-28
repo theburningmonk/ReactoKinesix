@@ -34,6 +34,17 @@ module internal Utils =
         if config.MaxKinesisRetries < 0 then
             raise <| NegativeMaxKinesisRetriesConfigurationException(config.MaxKinesisRetries)
 
+        // work out the minimum expiry we should allow the handover requests to complete based on the 
+        // other configurations, whilst also allowing extra time in case the processing of a batch 
+        // takes a long time (hence delaying how quickly the current node stops heartbeating from the 
+        // moment it's notified about the handover request)
+        let minHandoverReqExpiry = config.HeartbeatTimeout + 
+                                   config.CheckPendingHandoverRequestFrequency + 
+                                   config.CheckUnprocessedShardsFrequency + 
+                                   TimeSpan.FromMinutes(3.0)
+        if config.HandoverRequestExpiry < minHandoverReqExpiry then
+            raise <| InsufficientHandoverRequestExpiryException(config.HandoverRequestExpiry)
+
     let logDebug (logger : ILog) format (args : obj[]) = if logger.IsDebugEnabled then logger.DebugFormat(format, args)
     let logInfo  (logger : ILog) format (args : obj[]) = if logger.IsInfoEnabled  then logger.InfoFormat(format, args)
     let logWarn  (logger : ILog) format (args : obj[]) = if logger.IsWarnEnabled  then logger.WarnFormat(format, args)    
