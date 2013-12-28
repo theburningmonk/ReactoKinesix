@@ -210,7 +210,7 @@ As you scale up the *stream* by adding more shards to it, you will need to incre
 
 ## Error Handling
 
-As mentioned in the [**Getting Started**](#Getting Started) section of this guide, the `IRecordProcessor` interface requires you to implement these three methods:
+As mentioned in the [**Getting Started**](#getting-started) section of this guide, the `IRecordProcessor` interface requires you to implement these three methods:
 - `Process`
 - `GetErrorHandlingMode`
 - `OnMaxRetryExceeded`
