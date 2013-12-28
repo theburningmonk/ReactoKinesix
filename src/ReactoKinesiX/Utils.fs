@@ -370,11 +370,12 @@ module internal DynamoDBUtils =
                                      | Some { Expiry = expiry } -> now >= expiry
 
             match isHeartbeatExpired, isHandoverExpired with
-            | true, true    -> ShardStatus.NotProcessing(shardId, workerId, heartbeat, seqNum)
-            | true, false   -> let (Some { FromWorker = fromWorker; ToWorker = toWorker }) = handoverReq
-                               ShardStatus.HandingOver(shardId, WorkerId fromWorker, WorkerId toWorker, seqNum)
-            | false, _      -> ShardStatus.Processing(shardId, workerId, seqNum, handoverReq)
-
+            | true,  true  -> ShardStatus.NotProcessing(shardId, workerId, heartbeat, seqNum)            
+            | true,  false -> let (Some { FromWorker = fromWorker; ToWorker = toWorker }) = handoverReq
+                              ShardStatus.HandingOver(shardId, WorkerId fromWorker, WorkerId toWorker, seqNum)
+            | false, true  -> ShardStatus.Processing(shardId, workerId, seqNum, None)
+            | false, false -> ShardStatus.Processing(shardId, workerId, seqNum, handoverReq)
+            
     /// Returns the current status of the shard
     let getShardStatus (dynamoDB : IAmazonDynamoDB) 
                        (config   : ReactoKinesixConfig)
@@ -499,7 +500,7 @@ module internal DynamoDBUtils =
             // exception handling for this is done in the client code based on the operation (heartbeat or checkpoint)
             do! dynamoDB.UpdateItemAsync(req) |> Async.Ignore
 
-            logDebug "Issued handover request for shard [{0}] from worker [{1}] to worker [{2}] in table [{3}], expirying at [{4}]" 
+            logDebug "Issued handover request for shard [{0}] from worker [{1}] to worker [{2}] in table [{3}], expiring at [{4}]" 
                         [| shardId; fromWorkerId; toWorkerId; tableName; expiry |]
         }
         |> Async.Catch

@@ -609,7 +609,9 @@ and ReactoKinesixApp private (awsKey     : string,
             let! shardStatuses = DynamoDBUtils.getShardStatuses dynamoDB config tableName
             match shardStatuses with
             | Success statuses 
-                when statuses |> Array.exists (function | NotProcessing _ | HandingOver _ -> true | _ -> false) ->
+                when statuses |> Array.exists (function 
+                        | NotProcessing _ | HandingOver _ | Processing (_, _, _, Some _) -> true 
+                        | _ -> false) ->
                     logDebug "There are shards not currently being processed in the stream, skip attempt to share load until all shards are being processed" [||]
             | Success statuses ->
                 let shardsCount    = statuses.Length
@@ -650,6 +652,9 @@ and ReactoKinesixApp private (awsKey     : string,
         }
 
     let shareLoadSub = runScheduledTask config.LoadBalanceFrequency shareLoad
+    let proactiveShareLoadSub = shardProcessorCountChangedEvent.Publish
+                                    .Where((=) 0)
+                                    .Subscribe(fun _ -> Async.Start(shareLoad, cts.Token))
 
     let disposeInvoked = ref 0
     let cleanup (disposing : bool) =
@@ -659,6 +664,7 @@ and ReactoKinesixApp private (awsKey     : string,
             
             refreshSub.Dispose()
             shareLoadSub.Dispose()
+            proactiveShareLoadSub.Dispose()
 
             let shardProcessorCount = getShardProcessorCount()
             if shardProcessorCount > 0 then
