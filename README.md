@@ -3,6 +3,15 @@ Reacto-KinesiX
 
 A [Rx](https://rx.codeplex.com/)-based .Net client library for [Amazon Kinesis](http://aws.amazon.com/kinesis/).
 
+This guide contains the following sections:
+1. [The Basics](#the-basics) - how to get started using this library
+2. [Features](#features) - what you can expect from this library
+3. [Error Handling](#error-handling) - what happens when things go wrong
+4. [Distributed Processing](#distributed-processing) - what happens when you scale out your processing capability
+
+
+
+
 
 ## The Basics
 
@@ -203,9 +212,7 @@ If you need to use a different configuration to the default, then simply create 
 > **Note**: if you know that your application will use a **large number** of *shards* and worker nodes then you will want to **increase the read and write throughput** for the *DynamoDB* table otherwise database operations are likely to be throttled on a regular basis and **cause delays in processing your records**.
 
 
-#### Distributed processing
 
-As you scale up the *stream* by adding more shards to it, you will need to increase the processing capabilities   
 
 
 ## Error Handling
@@ -221,7 +228,9 @@ You can choose to retry the record a number of times and then either
 - skip the record
 - stop processing this shard altogether 
 
-if the specified retries have been reached and the error still persists then the library will proceed to call the `IRecordProcessor.OnMaxRetryExceeded` method to give you a last chance to handle the *record* before we skip to the next *record* or stop processing the *shard*. 
+if the specified retries have been reached and the error still persists then the library will proceed to call the `IRecordProcessor.OnMaxRetryExceeded` method to give you a last chance to handle the *record* before we skip to the next *record* or stop processing the *shard*.
+
+> **Note**: if you specify a retry count of 0 then the *record* will not be retried before skipping/stopping.
 
 > **Note**: you may want to ensure that the data carried by the failing *record* is not lost by implementing a mechanism to fall back to *Amazon SQS* in your implementation of `IRecordProcessor.OnMaxRetryExceeded`. 
 > 
@@ -233,13 +242,11 @@ if the specified retries have been reached and the error still persists then the
 
 #### tl;dr
 
-If this is too much of a long winded explanation, then the following flowchart should give you a pretty good idea of how the error handling flow works: 
-
 ![](http://i.imgur.com/Zv4cjuC.png)
 
 #### When to use *RetryAndStop*?
 
-> **Note**: *Amazon Kinesis* uses the *partition key* (which you supply when you push the *record* to *Kinesis*) to determine which 
+> *Amazon Kinesis* uses the *partition key* (which you supply when you push the *record* to *Kinesis*) to calculate a hash which determines which shard a *record* will go into. 
 
 When it's absolutely paramount for you to preserve the order in which records for a particular *partition key* is processed. For example, all analytic events for a player in a social game will have the same *partition key* and will therefore end up in the same shard and if these events must be processed sequentially then you will want to use the *RetryAndStop* error handing mode to ensure that persistent/temporary errors does not cause the events to be processed out-of-order.
 
@@ -247,3 +254,17 @@ When it's absolutely paramount for you to preserve the order in which records fo
 > 
 > However, other workers/nodes will still take over processing of this shard, but if the problem that is causing the *record* to fail is not local to the earlier node, then each and every node that attempts to process the shard will also fail and eventually they will all stop trying to process this particular shard.
 
+> **Note**: **lose of data is possible** if processing of a *shard* is stopped for a prolonged period and unprocessed *records* become unavailable as *Amazon Kinesis* only retains up to 24 hours worth of data.   
+
+#### When to use *RetryAndSkip*?
+
+In most cases! In order to prevent the build-up of backlogs or in extreme cases the lose of data you should avoid stopping processing of a *shard* in the event of errors except in exceptional circumstances, and instead rely on other mechanisms (such as the use of `Amazon SNS` and `Amazon SQS` as described earlier) to deal with persistent errors.
+
+
+
+
+
+
+## Distributed Processing
+
+As you scale up the *stream* by adding more shards to it, you will need to increase the processing capabilities   
