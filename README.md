@@ -310,6 +310,6 @@ As you can see, it took the same number of iterations to achieve essentially the
 
 #### Recovering from loss of workers
 
-Each of the workers routinely (based on the configured **CheckUnprocessedShardsFrequency**, see the [Configuring the client application](#configuring-the-client-application) section) checks to see if there are any shards that are not being processed based on the timestamp of the last heartbeat and the first worker that successfully updates the *DynamoDB* entry for the *shard* with its *worker ID* will resume responsibility of processing this shard. 
+Each of the workers routinely (based on the configured **CheckUnprocessedShardsFrequency**, see the [Configuring the client application](#configuring-the-client-application) section) checks to see if there are any *shards* that are not being processed based on the timestamp of the last heartbeat and the first worker that successfully updates the *DynamoDB* entry for the *shard* with its *worker ID* will resume responsibility of processing this *shard*. 
 
-So if a worker is terminated, the remaining workers will see this once the configured heartbeat time out has expired and one of them will succeed in taking over the processing of this shard.
+So if a worker is terminated, the remaining workers will see this once the configured heartbeat time out has expired and one of them will succeed in taking over the processing of this *shard*.
