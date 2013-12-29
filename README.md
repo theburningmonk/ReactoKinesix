@@ -246,13 +246,13 @@ if the specified retries have been reached and the error still persists then the
 
 #### When to use *RetryAndStop*?
 
-> *Amazon Kinesis* uses the *partition key* (which you supply when you push the *record* to *Kinesis*) to calculate a hash which determines which shard a *record* will go into. 
+> *Amazon Kinesis* uses the *partition key* (which you supply when you push the *record* to *Kinesis*) to calculate a hash which determines which *shard* a *record* will go into. 
 
-When it's absolutely paramount for you to preserve the order in which records for a particular *partition key* is processed. For example, all analytic events for a player in a social game will have the same *partition key* and will therefore end up in the same shard and if these events must be processed sequentially then you will want to use the *RetryAndStop* error handing mode to ensure that persistent/temporary errors does not cause the events to be processed out-of-order.
+When it's absolutely paramount for you to preserve the order in which *records* for a particular *partition key* is processed. For example, all analytic events for a player in a social game will have the same *partition key* and will therefore end up in the same *shard* and if these events must be processed sequentially then you will want to use the *RetryAndStop* error handing mode to ensure that persistent/temporary errors do not cause the events to be processed out-of-order.
 
-> **Note**: if processing of a shard is stopped due to the use of the **RetryAndStop** handling mode then the client application will not try to process this shard again unless explicitly told to do with when you call the `IReactoKinesixApp.StartProcessing` method. 
+> **Note**: if processing of a *shard* is stopped due to the use of the **RetryAndStop** handling mode then the client application will not try to process this *shard* again unless explicitly told to do with when you call the `IReactoKinesixApp.StartProcessing` method. 
 > 
-> However, other workers/nodes will still take over processing of this shard, but if the problem that is causing the *record* to fail is not local to the earlier node, then each and every node that attempts to process the shard will also fail and eventually they will all stop trying to process this particular shard.
+> However, other workers/nodes will still take over processing of this *shard*, but if the problem that is causing the *record* to fail is not local to the earlier node, then each and every node that attempts to process the *shard* will also fail and eventually they will all stop trying to process this particular *shard*.
 
 > **Important**: **loss of data is possible** if processing of a *shard* is stopped for a prolonged period and unprocessed *records* become unavailable as *Amazon Kinesis* only retains up to 24 hours worth of data.   
 
@@ -271,17 +271,17 @@ As you scale up a *stream* by adding more *shards* to it, you will need to incre
 
 Alternatively, you can also **scale up** your deployment by using bigger, more powerful *EC2* instance types, though generally speaking you'll eventually need to scale out at some point as your application grows and requires more and more throughput, so it's advantageous to take the distributed aspect of your *Kinesis*-consuming application into consideration at the earliest opportunity. 
 
-> **Important**: as of now, scaling down nodes running the client application will require graceful handling (i.e. you need to **dispose** of the running `IReactoKinesixApp` instance and wait for its `Dispose` method to complete) to ensure you don't lose any progress when processing a batch of *records* and that when another node takes over processing of the shards it wouldn't end up processing some of the same *records* again.
+> **Important**: as of now, scaling down nodes running the client application will require graceful handling (i.e. you need to **dispose** of the running `IReactoKinesixApp` instance and wait for its `Dispose` method to complete) to ensure you don't lose any progress when processing a batch of *records* and that when another node takes over processing of the *shards* it wouldn't end up processing some of the same *records* again.
 
 #### Distributing the processing of shards
 
 This library distributes and balances the load across a cluster of workers via a simple mechanism whereby workers who are processing fewer number of *shards* will request workers who are processing **at least 2 more** *shards* to hand over one of the *shards* they're currently processing.
 
-Since the workers form a master-less network, this process happens independently on each of the workers when:
+Since the workers form a **master-less** network, this process happens independently on each of the workers when:
 - the worker has become idle (not processing any *shards*)
 - the configured **LoadBalanceFrequency** has passed (see the [Configuring the client application](#configuring-the-client-application) section)
 
-To keep the decision making process simple, only one worker should be making handover requests at a time and only when all the shards are actively being processed, though this restriction might be lifted in future versions.
+To keep the decision making process simple, only one worker should be making handover requests at a time and only when all the *shards* are actively being processed, though this limitation might be removed in future versions.
 
 Using this approach, when multiple workers are started up at the same time it'll take several iterations to achieve a balanced distribution of load across the workers. Let's illustrate how this process works by walking through two examples:
 
@@ -289,20 +289,22 @@ Using this approach, when multiple workers are started up at the same time it'll
 
 ![Example 1](http://reacto-kinesix.s3.amazonaws.com/HandoverRequestFlowChart-1.png)
 
-As you can see, in this case it took two iterations to balance the cluster. In the second iteration *Worker 3* issued a handover request only to *Worker 1* because only workers who are processing at least 2 more shards is issued a request.
+As you can see, in this simple case it took two iterations to balance the cluster. In the second iteration *Worker 3* issued a handover request only to *Worker 1* because only workers who are processing at least 2 more shards is issued a request.
 
 **Example 2 - two new workers join a cluster of two workers**
 
 ![Example 2](http://reacto-kinesix.s3.amazonaws.com/HandoverRequestFlowChart-2.png)
 
 
-In this example depending on the timing of events, there are a number of ways in which it things can play out but in the end you should end up with a cluster of 4 workers 1 worker processing 3 shards and the rest 2 shards each. An alternative turn of events could have resulted with the following:
+In this example depending on the timing of events, there are a number of ways in which things can play out but in the end you should have a cluster of 4 workers with one processing 3 shards and the rest 2 shards each. 
+
+In a parallel universe with a different turn of events, things might have turned out slightly differently:
 
 ![Example 2-Alt](http://reacto-kinesix.s3.amazonaws.com/HandoverRequestFlowChart-2-ver2.png)
 
-As you can see, the end result is essentially the same!
+As you can see, it took the same number of iterations to achieve essentially the same result!
 
-> **Remarks**: whilst it might have been easier to implement this using a topology with a master node (ala [Zookeeper](http://zookeeper.apache.org/)), or a distributed consensus algorithm such as [Raft](http://raftconsensus.github.io/) or [Paxos](http://en.wikipedia.org/wiki/Paxos_(computer_science)), both require making assumptions about connectivity between workers which I did not think is justified at the framework level.
+> **Remarks**: whilst it might have been easier to implement the distribution of *shards* using a topology with a master node (ala [Zookeeper](http://zookeeper.apache.org/)), or a distributed consensus algorithm such as [Raft](http://raftconsensus.github.io/) or [Paxos](http://en.wikipedia.org/wiki/Paxos_(computer_science)), both require making assumptions about connectivity between workers which I did not think is justified at the library level.
 > 
 > For instance, it's reasonable to assume a configuration whereby workers are distributed across on-premise and cloud-hosted resources where both can access *Amazon*'s services but connectivity between the clusters is not guaranteed (you might not want to open up public access to your *EC2* instances).
 
