@@ -81,6 +81,13 @@ module internal Utils =
             use memStream = new MemoryStream()
             serializer.WriteObject(memStream, x)
             memStream.ToArray() |> Encoding.UTF8.GetString)
+    
+    // since the async methods from the AWSSDK excepts with AggregateException which is not all that useful, hence
+    // this active pattern which unwraps any AggregateException
+    let rec (|Flatten|) (exn : Exception) =
+        match exn with
+        | :? AggregateException as aggrExn -> Flatten aggrExn.InnerException
+        | exn -> exn
 
     type Observable with
         /// Returns an IObservable<T> from an Async<T> (from http://cs.hubfs.net/topic/None/59632#comment-72865)
@@ -149,11 +156,6 @@ module internal Utils =
             Agent.Start((fun inbox -> watchdog body inbox), ?cancellationToken = cancellationToken)
 
 module internal KinesisUtils =
-    type IAmazonKinesis with
-        member this.GetRecordsAsync req       = Async.FromBeginEnd(req, this.BeginGetRecords, this.EndGetRecords)
-        member this.GetShardIteratorAsync req = Async.FromBeginEnd(req, this.BeginGetShardIterator, this.EndGetShardIterator)        
-        member this.DescribeStreamAsync req   = Async.FromBeginEnd(req, this.BeginDescribeStream, this.EndDescribeStream)
-
     let private logger   = LogManager.GetLogger("KinesisUtils")
     let private logDebug = logDebug logger
     let private logError = logError logger
@@ -162,7 +164,7 @@ module internal KinesisUtils =
     let getShards (kinesis : IAmazonKinesis) (StreamName streamName) =
         async {
             let req = new DescribeStreamRequest(StreamName = streamName)
-            let! res = kinesis.DescribeStreamAsync(req)         
+            let! res = kinesis.DescribeStreamAsync(req) |> Async.AwaitTask        
                
             logDebug "Stream [{0}] has [{1}] shards: [{2}]"
                      [| res.StreamDescription.StreamName
@@ -192,7 +194,7 @@ module internal KinesisUtils =
             | Latest ->
                 req.ShardIteratorType       <- ShardIteratorType.LATEST
 
-            let! res = kinesis.GetShardIteratorAsync(req)
+            let! res = kinesis.GetShardIteratorAsync(req) |> Async.AwaitTask
 
             logDebug "Received shard iterator [{0}], type [{1}] for stream [{2}], shard [{3}]"
                      [| res.ShardIterator; req.ShardIteratorType; streamName; shardId |]
@@ -218,25 +220,18 @@ module internal KinesisUtils =
                     let! token = getShardIterator kinesis streamName shardId iteratorType
                     req.ShardIterator <- token
 
-                let! getRecordResult = Async.WithRetry(kinesis.GetRecordsAsync(req), config.MaxKinesisRetries)
+                let! getRecordResult = Async.WithRetry(kinesis.GetRecordsAsync(req) |> Async.AwaitTask, config.MaxKinesisRetries)
                 match getRecordResult with
                 | Success res -> 
                     logDebug "Received [{0}] records from stream [{1}], shard [{2}]"
                              [| res.Records.Count; streamName; shardId |]
                     return Success(res.NextShardIterator, res.Records |> Seq.map (fun r -> !> r : Record) |> Seq.toArray)
-                | Failure exn ->
+                | Failure (Flatten exn) ->
                     logError exn "Failed to get records from stream [{0}], shard [{1}]" [| streamName; shardId |]
                     return Failure(exn) 
         }
 
 module internal DynamoDBUtils =
-    type IAmazonDynamoDB with
-        member this.DescribeTableAsync req  = Async.FromBeginEnd(req, this.BeginDescribeTable, this.EndDescribeTable)
-        member this.GetItemAsync req        = Async.FromBeginEnd(req, this.BeginGetItem, this.EndGetItem)        
-        member this.PutItemAsync req        = Async.FromBeginEnd(req, this.BeginPutItem, this.EndPutItem)
-        member this.ScanAsync req           = Async.FromBeginEnd(req, this.BeginScan, this.EndScan)
-        member this.UpdateItemAsync req     = Async.FromBeginEnd(req, this.BeginUpdateItem, this.EndUpdateItem)
-
     let private shardIdAttr, lastHeartbeatAttr, workerIdAttr, checkpointAttr, isClosedAttr, handoverReqAttr = 
         "ShardId", "LastHeartbeat", "WorkerId", "SequenceNumberCheckpoint", "IsClosed", "HandoverRequest"
 
@@ -254,7 +249,7 @@ module internal DynamoDBUtils =
     let private parseBool (str : string) = match bool.TryParse(str) with | true, x -> x | _ -> false
     let private serializeHandoverReq   = serialize<HandoverRequest>
     let private deserializeHandoverReq = deserialize<HandoverRequest>
-
+    
     let private (|NoShard|ClosedShard|Shard|) (item : Dictionary<string, AttributeValue>) =
         let shardId = ShardId item.[shardIdAttr].S
 
@@ -326,7 +321,7 @@ module internal DynamoDBUtils =
     let rec awaitStateTableReady (dynamoDB : IAmazonDynamoDB) (TableName tableName as tn) =
         async {
             let req = new DescribeTableRequest(TableName = tableName)
-            let! res = dynamoDB.DescribeTableAsync(req)
+            let! res = dynamoDB.DescribeTableAsync(req) |> Async.AwaitTask
 
             logDebug "State table [{0}] current status [{1}]" [| tableName; res.Table.TableStatus |]
             
@@ -350,18 +345,20 @@ module internal DynamoDBUtils =
             req.Expected.Add(workerIdAttr,  new ExpectedAttributeValue(Exists = false))
 
             try
-                do! dynamoDB.PutItemAsync(req) |> Async.Ignore
+                let! _ = dynamoDB.PutItemAsync(req) |> Async.AwaitTask
 
                 logDebug "Created shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
                 return Success ()
             with
-            | :? ConditionalCheckFailedException ->
-                logDebug "(Conditional Check) Failed to create shard [{2}] data in state table [{0}] for worker [{1}]. Shard already exists in table."
-                         [| tableName; workerId; shardId |]
-                return Success ()
-            | exn ->
-                logError exn "Failed to create shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
-                return Failure exn
+            | Flatten exn ->
+                match exn with
+                | :? ConditionalCheckFailedException ->
+                    logDebug "(Conditional Check) Failed to create shard [{2}] data in state table [{0}] for worker [{1}]. Shard already exists in table."
+                             [| tableName; workerId; shardId |]
+                    return Success ()
+                | exn ->
+                    logError exn "Failed to create shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
+                    return Failure exn
         }
 
     /// Returns the current status of the shard given the item retrieved from DynamoDB
@@ -399,9 +396,10 @@ module internal DynamoDBUtils =
 
             logDebug "Getting current status of shard [{0}] from state table [{1}]" [| shardId; tableName |]
 
-            let! res = Async.WithRetry(dynamoDB.GetItemAsync(req), config.MaxDynamoDBRetries)            
+            let! res = Async.WithRetry(dynamoDB.GetItemAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)            
+
             match res with
-            | Failure exn -> return Failure exn
+            | Failure (Flatten exn) -> return Failure exn
             | Success res -> return Success <| getShardStatusInternal config.HeartbeatTimeout res.Item
         }
 
@@ -416,10 +414,10 @@ module internal DynamoDBUtils =
                                           AttributeValueList = new List<AttributeValue>([| new AttributeValue(S = "True") |]))
             req.ScanFilter.Add(isClosedAttr, condition)
 
-            let! res = Async.WithRetry(dynamoDB.ScanAsync(req), config.MaxDynamoDBRetries)
+            let! res = Async.WithRetry(dynamoDB.ScanAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
 
             match res with
-            | Failure exn -> return Failure exn
+            | Failure (Flatten exn) -> return Failure exn
             | Success res ->
                 let shardStatuses = res.Items |> Seq.map (getShardStatusInternal config.HeartbeatTimeout) |> Seq.toArray
                 return Success shardStatuses
@@ -446,7 +444,7 @@ module internal DynamoDBUtils =
             update req
 
             // exception handling for this is done in the client code based on the operation (heartbeat or checkpoint)
-            do! dynamoDB.UpdateItemAsync(req) |> Async.Ignore
+            let! _ = dynamoDB.UpdateItemAsync(req) |> Async.AwaitTask
 
             logDebug "Updated shard [{0}] for worker [{1}] in state table [{0}]" [| tableName; workerId; shardId |]
         }
@@ -509,7 +507,7 @@ module internal DynamoDBUtils =
             req.AttributeUpdates.Add(handoverReqAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = handoverReqVal))
             
             // exception handling for this is done in the client code based on the operation (heartbeat or checkpoint)
-            do! dynamoDB.UpdateItemAsync(req) |> Async.Ignore
+            let! _ = dynamoDB.UpdateItemAsync(req) |> Async.AwaitTask
 
             logDebug "Issued handover request for shard [{0}] from worker [{1}] to worker [{2}] in table [{3}], expiring at [{4}]" 
                         [| shardId; fromWorkerId; toWorkerId; tableName; expiry |]
@@ -528,10 +526,10 @@ module internal DynamoDBUtils =
 
             logDebug "Getting pending handover request for shard [{0}] in state table [{1}]" [| shardId; tableName |]
 
-            let! res = Async.WithRetry(dynamoDB.GetItemAsync(req), config.MaxDynamoDBRetries)
+            let! res = Async.WithRetry(dynamoDB.GetItemAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
 
             match res with
-            | Failure exn -> return Failure exn
+            | Failure (Flatten exn) -> return Failure exn
             | Success res -> 
                 match tryGetAttributeValue res.Item handoverReqAttr with
                 | Some str -> return Success (Some <| deserializeHandoverReq str)

@@ -26,13 +26,13 @@ type OnBatchProcessedDelegate = delegate of obj * EventArgs -> unit
 /// Represents a processor that is responsible for processing any records received from the stream.
 type IRecordProcessor = 
     /// Process a record
-    abstract member Process : Record -> unit
+    abstract member Process : record : Record -> unit
 
     /// Determines how to handle a record which had failed to be processed
-    abstract member GetErrorHandlingMode    : Record -> ErrorHandlingMode
+    abstract member GetErrorHandlingMode    : record : Record -> ErrorHandlingMode
 
     /// This method is called when we have exceeded the number of retries for a record
-    abstract member OnMaxRetryExceeded      : Record * ErrorHandlingMode -> unit
+    abstract member OnMaxRetryExceeded      : record : Record * errorHandlingMode : ErrorHandlingMode -> unit
 
 /// Represents a client application that consumes records from a Kinesis stream.
 /// Please use the static method "ReactoKinesixApp.CreateNew(...)" to create a new Kinesis client application.
@@ -101,20 +101,20 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 let! res = DynamoDBUtils.updateHeartbeat app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
                 match res with
                 | Choice1Of2 () -> heartbeatEvent.Trigger()
-                | Choice2Of2 ex -> match ex with 
-                                   | :? ConditionalCheckFailedException -> 
-                                        conditionalCheckFailedEvent.Trigger()
-                                   | _ -> // TODO : what's the right thing to do here?
-                                          // a) give up, let the next cycle (or next checkpoint update) update the heartbeat
-                                          // b) retry a few times
-                                          // c) retry until we succeed
-                                          // for now, try option a) as it's not entirely critical for one heartbeat update to
-                                          // succeed, if problem is with DynamoDB and it persists then eventually we'll be
-                                          // blocked on the checkpoint update too and either succeed eventualy or some other
-                                          // worker will take over if they were able to successful write to DynamoDB instead
-                                          // of the current worker
-                                          logWarn "Failed to update heartbeat, ignoring..." [||]
-                                          ()
+                | Choice2Of2 (Flatten exn) -> 
+                    match exn with 
+                    | :? ConditionalCheckFailedException -> conditionalCheckFailedEvent.Trigger()
+                    | _ -> // TODO : what's the right thing to do here?
+                           // a) give up, let the next cycle (or next checkpoint update) update the heartbeat
+                           // b) retry a few times
+                           // c) retry until we succeed
+                           // for now, try option a) as it's not entirely critical for one heartbeat update to
+                           // succeed, if problem is with DynamoDB and it persists then eventually we'll be
+                           // blocked on the checkpoint update too and either succeed eventualy or some other
+                           // worker will take over if they were able to successful write to DynamoDB instead
+                           // of the current worker
+                           logWarn "Failed to update heartbeat, ignoring..." [||]
+                           ()
             }
         Async.Start(work, cts.Token)
 
@@ -124,11 +124,11 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 let! res = DynamoDBUtils.updateIsClosed true app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
                 match res with
                 | Choice1Of2 ()  -> ()
-                | Choice2Of2 exn -> match exn with
-                                    | :? ConditionalCheckFailedException ->  
-                                        conditionalCheckFailedEvent.Trigger()
-                                    | _ -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
-                                           updateIsClosed()
+                | Choice2Of2 (Flatten exn) -> 
+                    match exn with
+                    | :? ConditionalCheckFailedException -> conditionalCheckFailedEvent.Trigger()
+                    | exn -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
+                             updateIsClosed()
             }
         Async.Start(work, cts.Token)
 
@@ -139,21 +139,20 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 match res with
                 | Choice1Of2 () -> logDebug "Updated sequence number checkpoint [{0}]" [| seqNum |]
                                    checkpointEvent.Trigger(seqNum)
-                | Choice2Of2 ex -> match ex with 
-                                   | :? ConditionalCheckFailedException -> 
-                                        conditionalCheckFailedEvent.Trigger()
-                                   | exn -> 
-                                          // TODO : what's the right thing to do here if we failed to update checkpoint? 
-                                          // a) keep going and risk allowing more records to be processed multiple times
-                                          // b) crash and let the last batch of records be processed against
-                                          // c) wait and recurse until we succeed until some other worker takes over
-                                          //    processing of the shard in which case we get conditional check failed
-                                          // for now, try option c) with a 1 second delay as the risk of processing the same
-                                          // records can ony be determined by the consumer, perhaps expose some configurable
-                                          // behaviour under these circumstances?
-                                          logError exn "Failed to update checkpoint to [{0}]...retrying" [| seqNum |]
-                                          do! Async.Sleep(1000)
-                                          updateCheckpoint seqNum
+                | Choice2Of2 (Flatten exn) -> 
+                    match exn with 
+                    | :? ConditionalCheckFailedException -> conditionalCheckFailedEvent.Trigger()
+                    | exn -> // TODO : what's the right thing to do here if we failed to update checkpoint? 
+                             // a) keep going and risk allowing more records to be processed multiple times
+                             // b) crash and let the last batch of records be processed against
+                             // c) wait and recurse until we succeed until some other worker takes over
+                             //    processing of the shard in which case we get conditional check failed
+                             // for now, try option c) with a 1 second delay as the risk of processing the same
+                             // records can ony be determined by the consumer, perhaps expose some configurable
+                             // behaviour under these circumstances?
+                             logError exn "Failed to update checkpoint to [{0}]...retrying" [| seqNum |]
+                             do! Async.Sleep(1000)
+                             updateCheckpoint seqNum
             }
         Async.Start(work, cts.Token)
 
@@ -380,9 +379,10 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                     Async.Start(fetchNextRecords <| getIterator seqNum, cts.Token)
                     initializedEvent.Trigger()
                 with
-                | :? ConditionalCheckFailedException ->
-                    conditionalCheckFailedEvent.Trigger()
-                | exn -> initializationFailedEvent.Trigger(exn)
+                | Flatten exn ->
+                    match exn with
+                    | :? ConditionalCheckFailedException -> conditionalCheckFailedEvent.Trigger()
+                    | exn -> initializationFailedEvent.Trigger(exn)
             }
 
         async {
@@ -496,7 +496,9 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
     let tableName            = TableName <| sprintf "%s%s" appName config.DynamoDBTableSuffix
     let mutable processor    = processor
     
-    let runScheduledTask freq job = Observable.Interval(freq).Subscribe(fun _ -> Async.Start(job, cts.Token))
+    let runScheduledTask freq job = 
+        let wrapped = job |> Async.Catch |> Async.Ignore
+        Observable.Interval(freq).Subscribe(fun _ -> Async.Start(wrapped, cts.Token))
         
     let updateShardProcessors (shardIds : string seq) (update : ShardId -> Async<unit>) = 
         async {
@@ -591,7 +593,7 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
             if rmvShards.Count > 0 then
                 logInfo "Remove [{0}] shards from known shards : [{1}]" [| rmvShards.Count; String.Join(",", rmvShards) |]
                 do! updateShardProcessors newShards rmvKnownShard
-       }
+        }
        
     let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
                       .Subscribe(fun _ -> 
@@ -748,15 +750,25 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
     static member CreateNew(awsKey    : string, 
                             awsSecret : string, 
                             region    : RegionEndpoint, 
-                            appName, streamName, workerId, processor, 
-                            ?config) =
-        let config     = defaultArg config <| new ReactoKinesixConfig()
+                            appName, streamName, workerId, processor) =
+        let config     = new ReactoKinesixConfig()
         let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
         let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)
         new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
 
-    static member CreateNew(kinesis, dynamoDB, appName, streamName, workerId, processor, ?config) =
-        let config = defaultArg config <| new ReactoKinesixConfig()
+    static member CreateNew(awsKey    : string, 
+                            awsSecret : string, 
+                            region    : RegionEndpoint, 
+                            appName, streamName, workerId, processor, config) =
+        let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
+        let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)
+        new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
+
+    static member CreateNew(kinesis, dynamoDB, appName, streamName, workerId, processor) =
+        let config = new ReactoKinesixConfig()
+        new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
+
+    static member CreateNew(kinesis, dynamoDB, appName, streamName, workerId, processor, config) =
         new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
 
     interface IReactoKinesixApp with

@@ -28,3 +28,4 @@ The project structure is simple as you'd expect with most F# projects, there's a
 **Client.fs** - this file contains the implementation for:
 - `ReactoKinesixApp` which represents a client application that consumes *records* from a *stream*
 - `ReactoKinesixShardProcessor` which is responsible for managing the processing of a particular *shard* in the *stream*
+
