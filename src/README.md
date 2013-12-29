@@ -7,7 +7,7 @@ The implementation of the solution is heavily based on F#'s [MailboxProcessor<'T
 
 If you are unfamiliar with *Rx* then a good place to start is the [Introduction to Rx](http://introtorx.com/) website, the [101 Rx samples](http://rxwiki.wikidot.com/101samples) wiki is also a good place to see plenty of *Rx* example usages.
 
-The `MaiboxProcessor<'T>` type is F#'s implementation of the **Actor Model**, which nowadays can be found in many programming languages such as Scala, Haskell, Akka (for Java), etc. but most famously as `processes` in the fabulous language that is Erlang!
+The `MaiboxProcessor<'T>` type is F#'s implementation of the **Actor Model**, which nowadays can be found in many programming languages/frameworks such as *Scala*, *Haskell*, *Akka* (for *Java*), etc. but most famously as *processes* in the fabulous language that is *Erlang*!
 
 If you want to learn more about the *Actor Model*, I strongly recommend watching this [recorded conversation](http://channel9.msdn.com/Shows/Going+Deep/Hewitt-Meijer-and-Szyperski-The-Actor-Model-everything-you-wanted-to-know-but-were-afraid-to-ask) between **Carl Hewitt** (father of the *Actor Model*), **Erik Meijer** (of the *LINQ* and *Rx* fame) and *Clemens Szyperski*, with my summation of the key points [here](http://theburningmonk.com/2012/09/takeaways-from-hewitt-meijer-and-szyperskis-talk-on-the-actor-model/).
 
