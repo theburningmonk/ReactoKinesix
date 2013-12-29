@@ -4,10 +4,10 @@ Reacto-KinesiX
 A [Rx](https://rx.codeplex.com/)-based .Net client library for [Amazon Kinesis](http://aws.amazon.com/kinesis/).
 
 This guide contains the following sections:
-1. [The Basics](#the-basics) - how to get started using this library
-2. [Features](#features) - what you can expect from this library
-3. [Error Handling](#error-handling) - what happens when things go wrong
-4. [Distributed Processing](#distributed-processing) - what happens when you scale out your processing capability
+- [The Basics](#the-basics) - how to get started using this library
+- [Features](#features) - what you can expect from this library
+- [Error Handling](#error-handling) - what happens when things go wrong
+- [Distributed Processing](#distributed-processing) - what happens when you scale out your processing capability
 
 
 
