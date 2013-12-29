@@ -464,9 +464,8 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
         logWarn "Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead." [||]
         cleanup(false)
 
-and ReactoKinesixApp private (awsKey     : string, 
-                              awsSecret  : string, 
-                              region     : RegionEndpoint,
+and ReactoKinesixApp private (kinesis    : IAmazonKinesis, 
+                              dynamoDB   : IAmazonDynamoDB, 
                               appName    : string,
                               streamName : string,
                               workerId   : string,
@@ -492,9 +491,7 @@ and ReactoKinesixApp private (awsKey     : string,
     let initializedEvent                = new Event<OnInitializedDelegate, EventArgs>()
     let batchProcessedEvent             = new Event<OnBatchProcessedDelegate, EventArgs>()
     let shardProcessorCountChangedEvent = new Event<int>()  // when the number of shard processors have changed
-
-    let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
-    let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)    
+ 
     let streamName, workerId = StreamName streamName, WorkerId workerId
     let tableName            = TableName <| sprintf "%s%s" appName config.DynamoDBTableSuffix
     let mutable processor    = processor
@@ -748,9 +745,19 @@ and ReactoKinesixApp private (awsKey     : string,
     member internal this.MarkAsClosed shardId   = markAsClosed shardId |> ignore
     member internal this.StopProcessing shardId = stopShardProcessor shardId |> ignore
 
-    static member CreateNew(awsKey, awsSecret, region, appName, streamName, workerId, processor, ?config) =
+    static member CreateNew(awsKey    : string, 
+                            awsSecret : string, 
+                            region    : RegionEndpoint, 
+                            appName, streamName, workerId, processor, 
+                            ?config) =
+        let config     = defaultArg config <| new ReactoKinesixConfig()
+        let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
+        let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)
+        new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
+
+    static member CreateNew(kinesis, dynamoDB, appName, streamName, workerId, processor, ?config) =
         let config = defaultArg config <| new ReactoKinesixConfig()
-        new ReactoKinesixApp(awsKey, awsSecret, region, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
+        new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
 
     interface IReactoKinesixApp with
         [<CLIEvent>] member this.OnInitialized    = initializedEvent.Publish
