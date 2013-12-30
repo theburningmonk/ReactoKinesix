@@ -1,4 +1,4 @@
-Reacto-KinesiX
+Reacto-KinesiX ([@ReactoKinesiX](https://twitter.com/ReactoKinesiX))
 =======================
 
 A [Rx](https://rx.codeplex.com/)-based .Net client library for [Amazon Kinesis](http://aws.amazon.com/kinesis/).
