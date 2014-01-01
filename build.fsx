@@ -9,6 +9,10 @@ open Fake.AssemblyInfoFile
 open Fake.ReleaseNotesHelper
 open System
 
+let buildDir = "build/"
+let testDir  = "test/"
+let tempDir  = "temp/"
+
 // --------------------------------------------------------------------------------------
 // START TODO: Provide project-specific details below
 // --------------------------------------------------------------------------------------
@@ -25,12 +29,22 @@ let project = "ReactoKinesix"
 
 // Short summary of the project
 // (used as description in AssemblyInfo and as a short summary for NuGet package)
-let summary = "A Rx-based client library for Amazon Kinesis"
+let summary = "A Rx-based .Net client library for Amazon Kinesis"
 
 // Longer description of the project
 // (used as a description for NuGet package; line breaks are automatically cleaned up)
 let description = """
-  Coming soon """
+  This client library makes it easy for you to build a record-consuming real time applications 
+  on top of the Amazon Kinesis service.
+
+
+  The library takes care of the plumbing required to track your progress and manage sharding
+  changes in the underlying stream, as wel as giving you different options to handle errors
+  on a record-by-record basis.
+
+
+  Scaling out your application is also supported and handled by the library, as new nodes start 
+  the processing of shards will be spread and load balanced automatically."""
 // List of author names (for NuGet package)
 let authors = [ "Yan Cui" ]
 // Tags for your project (for NuGet package)
@@ -38,7 +52,7 @@ let tags = "F# fsharp aws amazon kinesis bigdata rx"
 
 // File system information 
 // (<solutionFile>.sln is built during the building process)
-let solutionFile  = "ReactoKinesix"
+let projectFile  = "ReactoKinesix.fsproj"
 // Pattern specifying assemblies to be tested using NUnit
 let testAssemblies = ["tests/*/bin/*/ReactoKinesix*Tests*.dll"]
 
@@ -60,11 +74,11 @@ let release = parseReleaseNotes (IO.File.ReadAllLines "RELEASE_NOTES.md")
 Target "AssemblyInfo" (fun _ ->
   let fileName = "src/" + project + "/AssemblyInfo.fs"
   CreateFSharpAssemblyInfo fileName
-      [ Attribute.Title project
-        Attribute.Product project
-        Attribute.Description summary
-        Attribute.Version release.AssemblyVersion
-        Attribute.FileVersion release.AssemblyVersion ] 
+      [ Attribute.Title         project
+        Attribute.Product       project
+        Attribute.Description   summary
+        Attribute.Version       release.AssemblyVersion
+        Attribute.FileVersion   release.AssemblyVersion ] 
 )
 
 // --------------------------------------------------------------------------------------
@@ -73,22 +87,24 @@ Target "AssemblyInfo" (fun _ ->
 Target "RestorePackages" RestorePackages
 
 Target "Clean" (fun _ ->
-    CleanDirs ["bin"; "temp"]
+    CleanDirs [ buildDir; testDir; tempDir ]
 )
 
 Target "CleanDocs" (fun _ ->
-    CleanDirs ["docs/output"]
+    CleanDirs [ "docs/output" ]
 )
 
 // --------------------------------------------------------------------------------------
 // Build library & test project
 
+let files includes = 
+  { BaseDirectory = __SOURCE_DIRECTORY__
+    Includes = includes
+    Excludes = [] } 
+
 Target "Build" (fun _ ->
-    { BaseDirectory = __SOURCE_DIRECTORY__
-      Includes = [ solutionFile +       ".sln"
-                   solutionFile + ".Tests.sln" ]
-      Excludes = [] } 
-    |> MSBuildRelease "" "Rebuild"
+    files [ "src/ReactoKinesiX/" + projectFile ]
+    |> MSBuildRelease buildDir "Rebuild"
     |> ignore
 )
 
@@ -130,10 +146,13 @@ Target "NuGet" (fun _ ->
             Version = release.NugetVersion
             ReleaseNotes = String.Join(Environment.NewLine, release.Notes)
             Tags = tags
-            OutputPath = "bin"
+            OutputPath = "nuget"
             AccessKey = getBuildParamOrDefault "nugetkey" ""
             Publish = hasBuildParam "nugetkey"
-            Dependencies = [] })
+            Dependencies = 
+                        [ "AWSSDK",  GetPackageVersion "packages" "AWSSDK"
+                          "Rx-Main", GetPackageVersion "packages" "Rx-Main"
+                          "FSharp.Reactive", GetPackageVersion "packages" "FSharp.Reactive" ] })
         ("nuget/" + project + ".nuspec")
 )
 
@@ -171,13 +190,13 @@ Target "All" DoNothing
   ==> "RestorePackages"
   ==> "AssemblyInfo"
   ==> "Build"
-  ==> "RunTests"
+//  ==> "RunTests"
   ==> "All"
 
 "All" 
-  ==> "CleanDocs"
-  ==> "GenerateDocs"
-  ==> "ReleaseDocs"
+//  ==> "CleanDocs"
+//  ==> "GenerateDocs"
+//  ==> "ReleaseDocs"
   ==> "NuGet"
   ==> "Release"
 

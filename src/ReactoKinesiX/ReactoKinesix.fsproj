@@ -30,10 +30,10 @@
     <DebugType>pdbonly</DebugType>
     <Optimize>true</Optimize>
     <Tailcalls>true</Tailcalls>
-    <OutputPath>..\..\bin</OutputPath>
+    <OutputPath>bin\Release</OutputPath>
     <DefineConstants>TRACE</DefineConstants>
     <WarningLevel>3</WarningLevel>
-    <DocumentationFile>..\..\bin\FSharp.ProjectTemplate.xml</DocumentationFile>
+    <DocumentationFile>bin\Release\ReactoKinesix.XML</DocumentationFile>
   </PropertyGroup>
   <PropertyGroup>
     <MinimumVisualStudioVersion Condition="'$(MinimumVisualStudioVersion)' == ''">11</MinimumVisualStudioVersion>
@@ -53,11 +53,10 @@
   <Import Project="$(FSharpTargetsPath)" />
   <Import Project="$(SolutionDir)\.nuget\nuget.targets" />
   <ItemGroup>
+    <Compile Include="AssemblyInfo.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="Utils.fs" />
     <Compile Include="Client.fs" />
-    <None Include="Test.fsx" />
-    <None Include="Test2.fsx" />
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>

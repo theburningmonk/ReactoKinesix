@@ -1,2 +1,2 @@
-#### 0.1.0 - December 26 2013
+#### 0.1.0 - Jan 01, 2014
 * Initial release

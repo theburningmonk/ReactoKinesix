@@ -9,8 +9,8 @@ open Amazon
 open Amazon.Kinesis
 open Amazon.Kinesis.Model
 
-let awsKey      = "AKIAI5Y767DTOFBUSYAA"
-let awsSecret   = "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"
+let awsKey      = "AWS-KEY"
+let awsSecret   = "AWS-SECRET"
 let kinesis = Amazon.AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, RegionEndpoint.USEast1)
 
 let streamName = "YC-test"
