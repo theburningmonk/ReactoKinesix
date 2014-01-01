@@ -708,6 +708,7 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
             logDebug "Disposing..." [||]
             
             refreshSub.Dispose()
+            checkUnprocessedSub.Dispose()
             shareLoadSub.Dispose()
             proactiveShareLoadSub.Dispose()
 

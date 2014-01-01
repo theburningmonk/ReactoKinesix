@@ -9,6 +9,8 @@ This guide contains the following sections:
 - [Error Handling](#error-handling) - what happens when things go wrong
 - [Distributed Processing](#distributed-processing) - what happens when you scale out your processing capability
 
+You can check out the release note [here](https://github.com/theburningmonk/ReactoKinesiX/blob/develop/RELEASE_NOTES.md), and report issues [here](https://github.com/theburningmonk/ReactoKinesiX/issues).
+
 
 
 
