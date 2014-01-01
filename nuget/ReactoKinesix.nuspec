@@ -5,8 +5,8 @@
     <version>@build.number@</version>
     <authors>@authors@</authors>
     <owners>@authors@</owners>
-    <licenseUrl>http://github.com/theburningmonk/ReactoKinesiX/blob/develop/LICENSE.txt</licenseUrl>
-    <projectUrl>http://github.com/theburningmonk/ReactoKinesix/</projectUrl>
+    <licenseUrl>https://github.com/theburningmonk/ReactoKinesix/blob/master/LICENSE.txt</licenseUrl>
+    <projectUrl>https://github.com/theburningmonk/ReactoKinesix/</projectUrl>
     <iconUrl>https://raw.github.com/theburningmonk/ReactoKinesix/master/nuget/logo.png</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <summary>@summary@</summary>
