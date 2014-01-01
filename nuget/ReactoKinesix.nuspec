@@ -5,21 +5,17 @@
     <version>@build.number@</version>
     <authors>@authors@</authors>
     <owners>@authors@</owners>
-    <licenseUrl>http://github.com/theburningmonk/ReactoKinesiX/blob/develop/LICENSE.txt</licenseUrl>
-    <projectUrl>http://github.com/theburningmonk/ReactoKinesix/</projectUrl>
+    <licenseUrl>https://github.com/theburningmonk/ReactoKinesix/blob/master/LICENSE.txt</licenseUrl>
+    <projectUrl>https://github.com/theburningmonk/ReactoKinesix/</projectUrl>
     <iconUrl>https://raw.github.com/theburningmonk/ReactoKinesix/master/nuget/logo.png</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <summary>@summary@</summary>
     <description>
-      This client library makes it easy for you to build a record-consuming real time applications
-      on top of the Amazon Kinesis service.
+      This client library makes it easy for you to build a record-consuming real time applications on top of the Amazon Kinesis service.
 
-      The library takes care of the plumbing required to track your progress and manage sharding
-      changes in the underlying stream, as wel as giving you different options to handle errors
-      on a record-by-record basis.
+      The library takes care of the plumbing required to track your progress and manage sharding changes in the underlying stream, as well as giving you different options to handle errors on a record-by-record basis.
 
-      Scaling out your application is also supported and handled by the library, as new nodes start
-      the processing of shards will be spread and load balanced automatically.
+      Scaling out your application is also supported and handled by the library, as new nodes start the processing of shards will be spread and load balanced automatically.
     </description>
     <releaseNotes>@releaseNotes@</releaseNotes>
     <copyright>Copyright 2013</copyright>

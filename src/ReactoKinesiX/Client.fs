@@ -293,27 +293,28 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                     logInfo "Processing has stopped [{0}]." [| reason |]
                     (this :> IDisposable).Dispose())
 
-    let _       = Observable
-                    .Interval(app.Config.Heartbeat)
-                    .SkipUntil(initializedEvent.Publish)
-                    .TakeUntil(stopped)
-                    .Subscribe(updateHeartbeat)
+    let heartbeatSub = 
+        Observable
+            .Interval(app.Config.Heartbeat)
+            .SkipUntil(initializedEvent.Publish)
+            .TakeUntil(stopped)
+            .Subscribe(updateHeartbeat)
 
-    let checkpoint  = checkpointEvent.Publish.Select(fun _ -> ())
+    let checkpoint   = checkpointEvent.Publish.Select(fun _ -> ())
 
     // signal to process the next batch of records that has been received
-    let nextBatch   = initializedEvent.Publish
+    let nextBatch    = initializedEvent.Publish
                         .Merge(Observable.Delay(emptyReceiveEvent.Publish, app.Config.EmptyReceiveDelay))
                         .Merge(checkpoint)
                         .TakeUntil(stopProcessing)
 
-    let processed   = batchProcessedEvent.Publish
+    let processed    = batchProcessedEvent.Publish
 
     // fetch new records after the previous batch has been processed until we need to either stop processing or the shard is closed
     let stopFetching    = stopProcessing.Merge(shardClosedEvent.Publish.Select(fun _ -> StoppedReason.ShardClosed))
 
     let fetch           = processed.TakeUntil(stopFetching)
-    let _               = fetch.Subscribe(fun (_, iterator) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
+    let fetchSub        = fetch.Subscribe(fun (_, iterator) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
 
     let received        = batchReceivedEvent.Publish
 
@@ -351,11 +352,12 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 .Take(1)
                 .Subscribe(fun reason -> stoppedEvent.Trigger reason)
        
-    let _ = Observable
-                .Interval(app.Config.CheckPendingHandoverRequestFrequency)
-                .SkipUntil(initializedEvent.Publish)
-                .TakeUntil(stopProcessing)
-                .Subscribe(fun _ -> Async.Start(checkPendingHandoverRequest, cts.Token))
+    let handoverCheckSub = 
+        Observable
+            .Interval(app.Config.CheckPendingHandoverRequestFrequency)
+            .SkipUntil(initializedEvent.Publish)
+            .TakeUntil(stopProcessing)
+            .Subscribe(fun _ -> Async.Start(checkPendingHandoverRequest, cts.Token))
                 
     //#endregion
 
@@ -443,7 +445,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
             cts.Cancel()
 
-            [| processingSub; retryInitSub; (cts :> IDisposable) |]
+            [| heartbeatSub; fetchSub; processingSub; retryInitSub; handoverCheckSub; (cts :> IDisposable) |]
             |> Array.iter (fun x -> x.Dispose())
 
             logDebug "Disposed." [||]

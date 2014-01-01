@@ -39,7 +39,7 @@ let description = """
 
 
   The library takes care of the plumbing required to track your progress and manage sharding
-  changes in the underlying stream, as wel as giving you different options to handle errors
+  changes in the underlying stream, as well as giving you different options to handle errors
   on a record-by-record basis.
 
 
@@ -151,6 +151,7 @@ Target "NuGet" (fun _ ->
             Publish = hasBuildParam "nugetkey"
             Dependencies = 
                         [ "AWSSDK",  GetPackageVersion "packages" "AWSSDK"
+                          "log4net", GetPackageVersion "packages" "log4net"
                           "Rx-Main", GetPackageVersion "packages" "Rx-Main"
                           "FSharp.Reactive", GetPackageVersion "packages" "FSharp.Reactive" ] })
         ("nuget/" + project + ".nuspec")
