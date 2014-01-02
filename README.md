@@ -24,6 +24,10 @@ Please familiarize yourself with how **Amazon Kinesis** works by looking through
 
 #### Getting Started
 
+Download and install the library from Nuget [here](https://www.nuget.org/packages/ReactoKinesix/).
+
+<a href="https://www.nuget.org/packages/ReactoKinesix/"><img src="https://raw.github.com/theburningmonk/ReactoKinesiX/develop/nuget/banner.png"/></a>
+
 This library enables you to create a client application which consumes and processes records that have been pushed to an *Amazon Kinesis* **stream** by taking care of most of the plumbing involved.
 
 To process incoming records, you need to provide an implementation for the `IRecordProcessor` interface which has the following methods:
