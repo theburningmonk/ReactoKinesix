@@ -481,7 +481,7 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
     
     do Utils.validateConfig config
 
-    let loggerName = sprintf "ReactoKinesixApp[AppName:%s, Stream:%O]" appName streamName
+    let loggerName = sprintf "ReactoKinesixApp[AppName:%s, Stream:%s]" appName streamName
     let logger     = LogManager.GetLogger(loggerName)
     let logDebug   = logDebug logger
     let logInfo    = logInfo  logger
