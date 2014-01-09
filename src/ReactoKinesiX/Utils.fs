@@ -12,6 +12,8 @@ open System.Threading.Tasks
 
 open log4net
 
+open Amazon.CloudWatch
+open Amazon.CloudWatch.Model
 open Amazon.DynamoDBv2
 open Amazon.DynamoDBv2.Model
 open Amazon.Kinesis
@@ -47,7 +49,7 @@ module internal Utils =
 
     let logDebug (logger : ILog) format (args : obj[]) = if logger.IsDebugEnabled then logger.DebugFormat(format, args)
     let logInfo  (logger : ILog) format (args : obj[]) = if logger.IsInfoEnabled  then logger.InfoFormat(format, args)
-    let logWarn  (logger : ILog) format (args : obj[]) = if logger.IsWarnEnabled  then logger.WarnFormat(format, args)    
+    let logWarn  (logger : ILog) format (args : obj[]) = if logger.IsWarnEnabled  then logger.WarnFormat(format, args)
     let logError (logger : ILog) exn format (args : obj[]) = 
         if logger.IsErrorEnabled then
             let msg = String.Format(format, args)
@@ -61,13 +63,18 @@ module internal Utils =
         loop n
 
     /// Default function for calcuating delay (in milliseconds) between retries, based on (http://en.wikipedia.org/wiki/Exponential_backoff)
-    /// TODO : can be memoized
-    let private exponentialDelay attempts =
-        let rec sum acc = function | 0 -> acc | n -> sum (acc + n) (n - 1)
+    /// After 8 retries the delay starts to become unreasonable for most scenarios, so cap the delay at that
+    let private exponentialDelay =
+        let calcDelay retries = 
+            let rec sum acc = function | 0 -> acc | n -> sum (acc + n) (n - 1)
 
-        let n = pown 2 attempts - 1
-        let slots = float (sum 0 n) / float (n + 1)
-        int (500.0 * slots)
+            let n = pown 2 retries - 1
+            let slots = float (sum 0 n) / float (n + 1)
+            int (100.0 * slots)
+
+        let delays = [| 0..8 |] |> Array.map calcDelay
+
+        (fun retries -> delays.[min retries 8])
 
     let deserialize<'T> = 
         let serializer = new DataContractJsonSerializer(typeof<'T>)
@@ -130,9 +137,9 @@ module internal Utils =
                     match res with
                     | Choice1Of2 x -> return Success x
                     | Choice2Of2 _ when retryCount <= maxRetries -> 
-                        do! calcDelay (retryCount + 1) |> Async.Sleep
+                        do! calcDelay retryCount |> Async.Sleep
                         return! loop (retryCount + 1)
-                    | Choice2Of2 exn -> return Failure exn
+                    | Choice2Of2 (Flatten exn) -> return Failure exn
                 }
             loop 0
 
@@ -154,6 +161,65 @@ module internal Utils =
             }
 
             Agent.Start((fun inbox -> watchdog body inbox), ?cancellationToken = cancellationToken)
+
+    module Seq =
+        // originaly from http://fssnip.net/1o
+        let groupsOfAtMost (size: int) (s: seq<'v>) =
+            seq {
+                let en = s.GetEnumerator ()
+                let more = ref true
+                while !more do
+                    let group =
+                        [|
+                            let i = ref 0
+                            while !i < size && en.MoveNext () do
+                                yield en.Current
+                                i := !i + 1
+                        |]
+                    if group.Length = 0 
+                    then more := false
+                    else yield group
+            }
+
+module internal CloudWatchUtils =
+    let private logger = LogManager.GetLogger("CloudWatchUtils")
+    
+    // this metric name and dimensions would make our custom metrics go into the same place as the rest of the Kinesis metrics
+    let metricNamespace, streamDimensionName, shardDimensionName = "Reacto-KinesiX", "StreamName", "ShardId"
+    let successMetricName, errorMetricName, handoverMetricName, fetchedMetricName = 
+        "Process.Success", "Process.Error", "Handover", "Fetched"
+
+    // batch up metrics into groups of 20
+    let private batchSize = 20
+
+    /// Push a bunch of metrics
+    let pushMetrics (cloudWatch : IAmazonCloudWatch) (metrics : Metric[]) =
+        let groups   = metrics |> Seq.groupsOfAtMost batchSize |> Seq.toArray
+        let requests = groups  |> Array.map (fun metrics -> 
+            let req  = new PutMetricDataRequest(Namespace = metricNamespace)
+            let data = metrics |> Seq.map (fun m -> 
+                        let stats = new StatisticSet(Minimum = m.Min, Maximum = m.Max, Sum = m.Sum, SampleCount = m.Count)
+                        let datum = new MetricDatum(MetricName      = m.MetricName, 
+                                                    Timestamp       = m.Timestamp,
+                                                    Unit            = m.Unit,
+                                                    StatisticValues = stats)
+                        datum.Dimensions.AddRange(m.Dimensions)
+                        datum)
+            req.MetricData.AddRange(data)
+            req)
+
+        let pushMetricsInternal (cloudWatch : IAmazonCloudWatch) req =
+            async {
+                let! res = Async.WithRetry(cloudWatch.PutMetricDataAsync(req) |> Async.AwaitTask, 2)
+                match res with
+                | Success _   -> logDebug logger "Successfully pushed [{0}] metrics." [| req.MetricData.Count |]
+                | Failure exn -> logWarn  logger "Failed to push [{0}] metrics.\n{1}" [| req.MetricData.Count; exn |]
+            }
+
+        async {
+            logDebug logger "Pushing [{0}] metrics in [{1}] batches." [| metrics.Length; requests.Length |]
+            do! requests |> Seq.map (pushMetricsInternal cloudWatch) |> Async.Parallel |> Async.Ignore
+        }
 
 module internal KinesisUtils =
     let private logger   = LogManager.GetLogger("KinesisUtils")
@@ -226,7 +292,7 @@ module internal KinesisUtils =
                     logDebug "Received [{0}] records from stream [{1}], shard [{2}]"
                              [| res.Records.Count; streamName; shardId |]
                     return Success(res.NextShardIterator, res.Records |> Seq.map (fun r -> !> r : Record) |> Seq.toArray)
-                | Failure (Flatten exn) ->
+                | Failure exn ->
                     logError exn "Failed to get records from stream [{0}], shard [{1}]" [| streamName; shardId |]
                     return Failure(exn) 
         }
@@ -399,7 +465,7 @@ module internal DynamoDBUtils =
             let! res = Async.WithRetry(dynamoDB.GetItemAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)            
 
             match res with
-            | Failure (Flatten exn) -> return Failure exn
+            | Failure exn -> return Failure exn
             | Success res -> return Success <| getShardStatusInternal config.HeartbeatTimeout res.Item
         }
 
@@ -417,7 +483,7 @@ module internal DynamoDBUtils =
             let! res = Async.WithRetry(dynamoDB.ScanAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
 
             match res with
-            | Failure (Flatten exn) -> return Failure exn
+            | Failure exn -> return Failure exn
             | Success res ->
                 let shardStatuses = res.Items |> Seq.map (getShardStatusInternal config.HeartbeatTimeout) |> Seq.toArray
                 return Success shardStatuses
@@ -529,7 +595,7 @@ module internal DynamoDBUtils =
             let! res = Async.WithRetry(dynamoDB.GetItemAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
 
             match res with
-            | Failure (Flatten exn) -> return Failure exn
+            | Failure exn -> return Failure exn
             | Success res -> 
                 match tryGetAttributeValue res.Item handoverReqAttr with
                 | Some str -> return Success (Some <| deserializeHandoverReq str)

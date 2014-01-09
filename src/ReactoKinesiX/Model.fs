@@ -1,6 +1,9 @@
 ﻿namespace ReactoKinesix.Model
 
 open System
+
+open Amazon.CloudWatch
+open Amazon.CloudWatch.Model
 open Amazon.DynamoDBv2.DataModel
 
 /// Representing the different modes in which to handle errors when processing records
@@ -183,3 +186,40 @@ module internal InternalModel =
         | AddKnownShard         of ShardId * AsyncReplyChannel<unit>
         | MarkAsClosed          of ShardId * AsyncReplyChannel<unit>
         | RemoveKnownShard      of ShardId * AsyncReplyChannel<unit>
+
+    type Metric = 
+        {
+            Dimensions      : Dimension[]
+            MetricName      : string
+            Timestamp       : DateTime
+            Unit            : StandardUnit
+            mutable Average : double
+            mutable Sum     : double
+            mutable Max     : double
+            mutable Min     : double
+            mutable Count   : double
+        }
+
+        static member Init (timestamp : DateTime, dimensions : Dimension[], unit, metricName, n) =
+            { 
+                Dimensions  = dimensions
+                MetricName  = metricName
+                Timestamp   = timestamp
+                Unit        = unit
+                Average     = n
+                Sum         = n
+                Max         = n
+                Min         = n
+                Count       = 1.0
+            }
+
+        member metric.AddDatapoint (n) =
+            match metric.Count with
+            | 0.0 -> metric.Max <- n
+                     metric.Min <- n
+            | _   -> metric.Max <- max metric.Max n
+                     metric.Min <- min metric.Min n
+
+            metric.Sum     <- metric.Sum + n
+            metric.Count   <- metric.Count + 1.0
+            metric.Average <- metric.Sum / metric.Count

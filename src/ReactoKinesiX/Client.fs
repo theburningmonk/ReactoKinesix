@@ -12,6 +12,7 @@ open System.Threading.Tasks
 open log4net
 
 open Amazon
+open Amazon.CloudWatch
 open Amazon.DynamoDBv2
 open Amazon.DynamoDBv2.Model
 open Amazon.Kinesis
@@ -468,6 +469,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
 and ReactoKinesixApp private (kinesis    : IAmazonKinesis, 
                               dynamoDB   : IAmazonDynamoDB, 
+                              cloudWatch : IAmazonCloudWatch,
                               appName    : string,
                               streamName : string,
                               workerId   : string,
@@ -757,7 +759,8 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
         let config     = new ReactoKinesixConfig()
         let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
         let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)
-        new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
+        let cloudWatch = AWSClientFactory.CreateAmazonCloudWatchClient(awsKey, awsSecret, region)
+        new ReactoKinesixApp(kinesis, dynamoDB, cloudWatch, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
 
     static member CreateNew(awsKey    : string, 
                             awsSecret : string, 
@@ -765,14 +768,15 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
                             appName, streamName, workerId, processor, config) =
         let kinesis    = AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region)
         let dynamoDB   = AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region)
-        new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
+        let cloudWatch = AWSClientFactory.CreateAmazonCloudWatchClient(awsKey, awsSecret, region)
+        new ReactoKinesixApp(kinesis, dynamoDB, cloudWatch, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
 
-    static member CreateNew(kinesis, dynamoDB, appName, streamName, workerId, processor) =
+    static member CreateNew(kinesis, dynamoDB, cloudWatch, appName, streamName, workerId, processor) =
         let config = new ReactoKinesixConfig()
-        new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
+        new ReactoKinesixApp(kinesis, dynamoDB, cloudWatch, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
 
-    static member CreateNew(kinesis, dynamoDB, appName, streamName, workerId, processor, config) =
-        new ReactoKinesixApp(kinesis, dynamoDB, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
+    static member CreateNew(kinesis, dynamoDB, cloudWatch, appName, streamName, workerId, processor, config) =
+        new ReactoKinesixApp(kinesis, dynamoDB, cloudWatch, appName, streamName, workerId, processor, config) :> IReactoKinesixApp
 
     interface IReactoKinesixApp with
         [<CLIEvent>] member this.OnInitialized    = initializedEvent.Publish

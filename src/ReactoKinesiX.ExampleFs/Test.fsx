@@ -1,7 +1,6 @@
 ﻿
 #r "bin/Debug/AWSSDK.dll"
 #r "bin/Debug/log4net.dll"
-#r "bin/Debug/FSharp.Reactive.dll"
 #r "bin/Debug/System.Reactive.Core.dll"
 #r "bin/Debug/System.Reactive.Interfaces.dll"
 #r "bin/Debug/System.Reactive.Linq.dll"
