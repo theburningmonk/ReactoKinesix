@@ -40,10 +40,11 @@ namespace ReactoKinesix.ExampleCs
 
             var kinesis = Amazon.AWSClientFactory.CreateAmazonKinesisClient();
             var dynamoDb = Amazon.AWSClientFactory.CreateAmazonDynamoDBClient();
+            var cloudWatch = Amazon.AWSClientFactory.CreateAmazonCloudWatchClient();
 
             Console.WriteLine("Starting client application...");
 
-            var app = ReactoKinesixApp.CreateNew(kinesis, dynamoDb, appName, streamName, workerId, processor);
+            var app = ReactoKinesixApp.CreateNew(kinesis, dynamoDb, cloudWatch, appName, streamName, workerId, processor);
 
             app.OnInitialized += (_, evtArgs) => Console.WriteLine("Client application started");
             app.OnBatchProcessed += (_, evtArgs) => Console.WriteLine("Another batch processed...");

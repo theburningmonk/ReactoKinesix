@@ -105,17 +105,17 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 | Choice2Of2 (Flatten exn) -> 
                     match exn with 
                     | :? ConditionalCheckFailedException -> conditionalCheckFailedEvent.Trigger()
-                    | _ -> // TODO : what's the right thing to do here?
-                           // a) give up, let the next cycle (or next checkpoint update) update the heartbeat
-                           // b) retry a few times
-                           // c) retry until we succeed
-                           // for now, try option a) as it's not entirely critical for one heartbeat update to
-                           // succeed, if problem is with DynamoDB and it persists then eventually we'll be
-                           // blocked on the checkpoint update too and either succeed eventualy or some other
-                           // worker will take over if they were able to successful write to DynamoDB instead
-                           // of the current worker
-                           logWarn "Failed to update heartbeat, ignoring..." [||]
-                           ()
+                    | exn -> 
+                        // TODO : what's the right thing to do here?
+                        // a) give up, let the next cycle (or next checkpoint update) update the heartbeat
+                        // b) retry a few times
+                        // c) retry until we succeed
+                        // for now, try option a) as it's not entirely critical for one heartbeat update to
+                        // succeed, if problem is with DynamoDB and it persists then eventually we'll be
+                        // blocked on the checkpoint update too and either succeed eventualy or some other
+                        // worker will take over if they were able to successful write to DynamoDB instead
+                        // of the current worker
+                        logWarn exn "Failed to update heartbeat, ignoring..." [||]
             }
         Async.Start(work, cts.Token)
 
@@ -201,11 +201,11 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
         let inline getMaxRetryExceededHandler mode =
             match mode with
             | RetryAndSkip _ -> 
-                (fun _ -> logWarn "Max retry exceeded for record [PartitionKey:{0}, SequenceNumber:{1}]. Skipping..." logArgs
-                          processor.OnMaxRetryExceeded(record, mode)
-                          Success(SequenceNumber record.SequenceNumber))
+                (fun exn -> logWarn exn "Max retry exceeded for record [PartitionKey:{0}, SequenceNumber:{1}]. Skipping..." logArgs
+                            processor.OnMaxRetryExceeded(record, mode)
+                            Success(SequenceNumber record.SequenceNumber))
             | RetryAndStop _ -> 
-                (fun exn -> logWarn "Max retry exceeded for record [PartitionKey:{0}, SequenceNumber:{1}]. Stopping..." logArgs
+                (fun exn -> logWarn exn "Max retry exceeded for record [PartitionKey:{0}, SequenceNumber:{1}]. Stopping..." logArgs
                             processor.OnMaxRetryExceeded(record, mode)
                             stopProcessingEvent.Trigger(StoppedReason.ErrorInduced)
                             Failure(SequenceNumber record.SequenceNumber, exn))
@@ -242,13 +242,12 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
             match results with
             | [||] ->
-                logWarn "First record failed. No record was proccessed." [||]
+                logger.Warn("First record failed. No record was proccessed.")
                 emptyReceiveEvent.Trigger()
                 batchProcessedEvent.Trigger(0, iterator)
             | arr when arr.Length < n ->
                 let (Success(seqNum)) = arr.[arr.Length - 1]
-                logWarn "Batch was partially processed [{0}/{1}], last successful sequence number [{2}]" 
-                        [| arr.Length; n; seqNum |]
+                logger.WarnFormat("Batch was partially processed [{0}/{1}], last successful sequence number [{2}]", arr.Length, n, seqNum)
 
                 updateCheckpoint(seqNum)
                 batchProcessedEvent.Trigger(arr.Length, NoIteratorToken <| AtSequenceNumber seqNum)
@@ -398,7 +397,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 | Failure exn -> initializationFailedEvent.Trigger(exn)
                 | Success status -> 
                     match status with
-                    | NotFound _ -> logWarn "Shard is not found. Please check if it was manually deleted from DynamoDB." [||]
+                    | NotFound _ -> logger.Warn("Shard is not found. Please check if it was manually deleted from DynamoDB.")
                                     initializationFailedEvent.Trigger(ShardNotFoundException)
                     | Closed _   -> shardClosedEvent.Trigger()
                     | NotProcessing(_, workerId', heartbeat, seqNum) -> 
@@ -464,7 +463,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
     // provide a finalizer so that in the case the consumer forgets to dispose of the shard processor the
     // finalizer will clean up
     override this.Finalize () =
-        logWarn "Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead." [||]
+        logger.Warn("Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead.")
         cleanup(false)
 
 and ReactoKinesixApp private (kinesis    : IAmazonKinesis, 
@@ -563,7 +562,7 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
                     knownShards.Remove(shardId) |> ignore
                     reply.Reply()
         }
-    let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn "Controller agent was restarted due to exception :\n {0}" [| exn |])
+    let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn exn "Controller agent was restarted due to exception" [||])
 
     let startShardProcessor shardId = controller.PostAndAsyncReply(fun reply -> StartShardProcessor(shardId, reply))
     let stopShardProcessor  shardId = controller.PostAndAsyncReply(fun reply -> StopShardProcessor(shardId, reply))
@@ -579,24 +578,28 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
     let checkStreamChanges =
         async {
             // find difference between the shards in the stream and the shards we're currenty processing
-            let! shards  = KinesisUtils.getShards kinesis streamName
-            let shardIds = shards |> Seq.map (fun shard -> shard.ShardId) |> Set.ofSeq
+            let! res = KinesisUtils.getShards kinesis streamName
 
-            let knownShards = knownShards.Keys |> Seq.map (fun (ShardId shardId) -> shardId) |> Set.ofSeq
-            let newShards   = Set.difference shardIds knownShards
-            let rmvShards   = Set.difference knownShards shardIds
+            match res with
+            | Success shards ->
+                let shardIds = shards |> Seq.map (fun shard -> shard.ShardId) |> Set.ofSeq
 
-            if newShards.Count > 0 then
-                let logArgs : obj[] = [| newShards.Count; String.Join(",", newShards) |]
-                logInfo "Add [{0}] shards to known shards : [{1}]" logArgs
-                do! updateShardProcessors newShards addKnownShard
+                let knownShards = knownShards.Keys |> Seq.map (fun (ShardId shardId) -> shardId) |> Set.ofSeq
+                let newShards   = Set.difference shardIds knownShards
+                let rmvShards   = Set.difference knownShards shardIds
 
-                logInfo "Starting shard processors for [{0}] shards : [{1}]" logArgs
-                do! updateShardProcessors newShards startShardProcessor
+                if newShards.Count > 0 then
+                    let logArgs : obj[] = [| newShards.Count; csv newShards |]
+                    logInfo "Add [{0}] shards to known shards : [{1}]" logArgs
+                    do! updateShardProcessors newShards addKnownShard
 
-            if rmvShards.Count > 0 then
-                logInfo "Remove [{0}] shards from known shards : [{1}]" [| rmvShards.Count; String.Join(",", rmvShards) |]
-                do! updateShardProcessors newShards rmvKnownShard
+                    logInfo "Starting shard processors for [{0}] shards : [{1}]" logArgs
+                    do! updateShardProcessors newShards startShardProcessor
+
+                if rmvShards.Count > 0 then
+                    logInfo "Remove [{0}] shards from known shards : [{1}]" [| rmvShards.Count; csv rmvShards |]
+                    do! updateShardProcessors newShards rmvKnownShard
+            | Failure exn -> logWarn exn "Failed to retrieve information about shards, skipping check for stream changes..." [||]
         }
        
     let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
@@ -628,7 +631,7 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
                                 |> Seq.toArray
 
             if shardsToCheck.Length > 0 then
-                let logArgs : obj[] = [| shardsToCheck.Length; String.Join(",", shardsToCheck) |]
+                let logArgs : obj[] = [| shardsToCheck.Length; shardsToCheck |]
                 logInfo "Found [{0}] shards that are not closed and not processed by this worker : [{1}]" logArgs                        
                 logInfo "Starting shard processors for [{0}] shards : [{1}]" logArgs
                 do! updateShardProcessors shardsToCheck startShardProcessor
@@ -686,7 +689,7 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
                                     |> Seq.toArray
 
                 logDebug "Attempting to request [{0}] workers to handover one of their shards : [{1}]" 
-                         [| targetWorkers.Length; String.Join(",", targetWorkers |> Seq.map (function WorkerId workerId -> workerId)) |]
+                         [| targetWorkers.Length; targetWorkers |> Seq.map (function WorkerId workerId -> workerId) |> csv |]
                 
                 targetWorkers 
                 |> Array.iter (fun fromWorkerId -> 
@@ -794,5 +797,5 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
     // provide a finalizer so that in the case the consumer forgets to dispose of the app the
     // finalizer will clean up
     override this.Finalize () =
-        logWarn "Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead." [||]
+        logger.Warn("Finalizer is invoked. Please ensure that the object is disposed in a deterministic manner instead.")
         cleanup(false)

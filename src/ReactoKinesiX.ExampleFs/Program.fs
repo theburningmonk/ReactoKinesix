@@ -24,12 +24,13 @@ let main argv =
                         member this.GetErrorHandlingMode _ = RetryAndStop 3
                         member this.OnMaxRetryExceeded (record, mode) = maxRetryExceeded record mode }
     
-    let kinesis  = Amazon.AWSClientFactory.CreateAmazonKinesisClient()
-    let dynamoDB = Amazon.AWSClientFactory.CreateAmazonDynamoDBClient()
+    let kinesis    = Amazon.AWSClientFactory.CreateAmazonKinesisClient()
+    let dynamoDB   = Amazon.AWSClientFactory.CreateAmazonDynamoDBClient()
+    let cloudWatch = Amazon.AWSClientFactory.CreateAmazonCloudWatchClient()
 
     printfn "Starting client application..."
 
-    let app = ReactoKinesixApp.CreateNew(kinesis, dynamoDB, appName, streamName, workerId, processor)
+    let app = ReactoKinesixApp.CreateNew(kinesis, dynamoDB, cloudWatch, appName, streamName, workerId, processor)
 
     app.OnInitialized.Add(fun _ -> printfn "Client application started")
     app.OnBatchProcessed.Add(fun _ -> printfn "Another batch processed...")

@@ -49,7 +49,10 @@ module internal Utils =
 
     let logDebug (logger : ILog) format (args : obj[]) = if logger.IsDebugEnabled then logger.DebugFormat(format, args)
     let logInfo  (logger : ILog) format (args : obj[]) = if logger.IsInfoEnabled  then logger.InfoFormat(format, args)
-    let logWarn  (logger : ILog) format (args : obj[]) = if logger.IsWarnEnabled  then logger.WarnFormat(format, args)
+    let logWarn  (logger : ILog) exn format (args : obj[]) = 
+        if logger.IsWarnEnabled  then 
+            let msg = String.Format(format, args)
+            logger.Warn(msg, exn)
     let logError (logger : ILog) exn format (args : obj[]) = 
         if logger.IsErrorEnabled then
             let msg = String.Format(format, args)
@@ -76,7 +79,7 @@ module internal Utils =
 
         (fun retries -> delays.[min retries 8])
 
-    let inline csv (arr : 'a[]) = String.Join(",", arr)
+    let inline csv (arr : 'a seq) = String.Join(",", arr)
 
     let deserialize<'T> = 
         let serializer = new DataContractJsonSerializer(typeof<'T>)
@@ -184,7 +187,9 @@ module internal Utils =
             }
 
 module internal CloudWatchUtils =
-    let private logger = LogManager.GetLogger("CloudWatchUtils")
+    let private logger   = LogManager.GetLogger("CloudWatchUtils")
+    let private logDebug = logDebug logger
+    let private logWarn  = logWarn logger
     
     // this metric name and dimensions would make our custom metrics go into the same place as the rest of the Kinesis metrics
     let metricNamespace, streamDimensionName, shardDimensionName = "Reacto-KinesiX", "StreamName", "ShardId"
@@ -214,12 +219,12 @@ module internal CloudWatchUtils =
             async {
                 let! res = Async.WithRetry(cloudWatch.PutMetricDataAsync(req) |> Async.AwaitTask, 2)
                 match res with
-                | Success _   -> logDebug logger "Successfully pushed [{0}] metrics." [| req.MetricData.Count |]
-                | Failure exn -> logWarn  logger "Failed to push [{0}] metrics.\n{1}" [| req.MetricData.Count; exn |]
+                | Success _   -> logDebug "Successfully pushed [{0}] metrics." [| req.MetricData.Count |]
+                | Failure exn -> logWarn  exn "Failed to push [{0}] metrics.\n{1}" [| req.MetricData.Count; exn |]
             }
 
         async {
-            logDebug logger "Pushing [{0}] metrics in [{1}] batches." [| metrics.Length; requests.Length |]
+            logDebug "Pushing [{0}] metrics in [{1}] batches." [| metrics.Length; requests.Length |]
             do! requests |> Seq.map (pushMetricsInternal cloudWatch) |> Async.Parallel |> Async.Ignore
         }
 
@@ -241,15 +246,14 @@ module internal KinesisUtils =
                 match res with 
                 | Success res when not res.StreamDescription.HasMoreShards -> 
                     let shards   = (res.StreamDescription.Shards :: acc) |> Seq.collect id |> Seq.toArray
-                    let shardIds = shards |> Seq.map (fun shard -> shard.ShardId) |> Seq.toArray
 
-                    logger.DebugFormat("Stream [{0}] has [{1}] shards: [{2}]", streamName, shardIds.Length, csv shardIds)
-                    return Success (res.StreamDescription.StreamStatus.Value, shards, shardIds)
+                    logDebug "Stream [{0}] has [{1}] shards" [| streamName; shards.Length |]
+                    return Success shards
                 | Success res ->
-                    let lastShardId = res.StreamDescription.Shards |> Seq.last
-                    return! describeStream (res.StreamDescription.Shards :: acc) (Some lastShardId.ShardId)
+                    let lastShard = res.StreamDescription.Shards |> Seq.last
+                    return! describeStream (res.StreamDescription.Shards :: acc) (Some lastShard.ShardId)
                 | Failure (Flatten exn) -> 
-                    logger.Error(sprintf "Failed to get shards for stream [%s]" streamName, exn)
+                    logError exn "Failed to get shards for stream [{0}]" [| streamName |]
                     return Failure exn
             }
             
@@ -386,9 +390,9 @@ module internal DynamoDBUtils =
 
             Success ()
         with
-        | :? ResourceInUseException -> 
+        | :? ResourceInUseException as exn -> 
             // already exists (perhaps race condition with multiple workers trying to create table at the same time)
-            logWarn "(Possible race condition) State table [{0}] already exists" [| tableName |]
+            logWarn exn "(Possible race condition) State table [{0}] already exists" [| tableName |]
             Success ()
         | exn -> Failure exn
 
@@ -488,21 +492,32 @@ module internal DynamoDBUtils =
     let getShardStatuses (dynamoDB : IAmazonDynamoDB)
                          (config   : ReactoKinesixConfig)
                          (TableName tableName) =
-        async {
-            let req = new ScanRequest(TableName = tableName)
-            req.AttributesToGet.AddRange([| shardIdAttr; workerIdAttr; checkpointAttr; lastHeartbeatAttr; isClosedAttr; handoverReqAttr |])
-            let condition = new Condition(ComparisonOperator = ComparisonOperator.NE,
-                                          AttributeValueList = new List<AttributeValue>([| new AttributeValue(S = "True") |]))
-            req.ScanFilter.Add(isClosedAttr, condition)
+        let rec scanTable acc exclusiveStartKey =
+            async {
+                let req = new ScanRequest(TableName = tableName)
+                match exclusiveStartKey with
+                | Some startKey -> req.ExclusiveStartKey <- startKey
+                | _ -> ()
 
-            let! res = Async.WithRetry(dynamoDB.ScanAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
+                req.AttributesToGet.AddRange([| shardIdAttr; workerIdAttr; checkpointAttr; lastHeartbeatAttr; isClosedAttr; handoverReqAttr |])
+                let condition = new Condition(ComparisonOperator = ComparisonOperator.NE,
+                                              AttributeValueList = new List<AttributeValue>([| new AttributeValue(S = "True") |]))
+                req.ScanFilter.Add(isClosedAttr, condition)
 
-            match res with
-            | Failure exn -> return Failure exn
-            | Success res ->
-                let shardStatuses = res.Items |> Seq.map (getShardStatusInternal config.HeartbeatTimeout) |> Seq.toArray
-                return Success shardStatuses
-        }
+                let! res = Async.WithRetry(dynamoDB.ScanAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
+
+                match res with
+                // when LastEvaluatedKey is null it means the last page of results have been process and there's no more data to be retrieved
+                | Success res when res.LastEvaluatedKey = null ->
+                    let shardStatuses = (res.Items :: acc) |> Seq.collect id |> Seq.map (getShardStatusInternal config.HeartbeatTimeout) |> Seq.toArray
+                    return Success shardStatuses
+                | Success res ->
+                    return! scanTable (res.Items :: acc) (Some res.LastEvaluatedKey)
+                | Failure exn -> 
+                    return Failure exn
+            }
+
+        async { return! scanTable [] None }
 
     /// Updates a shard conditionally against the worker ID so that if for some reason another worker has
     /// taken over processing of this shard then we shall stop further processing
