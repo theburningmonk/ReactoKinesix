@@ -76,6 +76,8 @@ module internal Utils =
 
         (fun retries -> delays.[min retries 8])
 
+    let inline csv (arr : 'a[]) = String.Join(",", arr)
+
     let deserialize<'T> = 
         let serializer = new DataContractJsonSerializer(typeof<'T>)
         (fun (str : string) -> 
@@ -228,17 +230,30 @@ module internal KinesisUtils =
     
     /// Returns the shards that are part of the stream
     let getShards (kinesis : IAmazonKinesis) (StreamName streamName) =
-        async {
-            let req = new DescribeStreamRequest(StreamName = streamName)
-            let! res = kinesis.DescribeStreamAsync(req) |> Async.AwaitTask        
-               
-            logDebug "Stream [{0}] has [{1}] shards: [{2}]"
-                     [| res.StreamDescription.StreamName
-                        res.StreamDescription.Shards.Count
-                        String.Join(",", res.StreamDescription.Shards |> Seq.map(fun shard -> shard.ShardId)) |]
+        let rec describeStream acc startShardId = 
+            async {
+                let req = new DescribeStreamRequest(StreamName = streamName)
+                match startShardId with
+                | Some shardId -> req.ExclusiveStartShardId <- shardId
+                | _ -> ()
+                    
+                let! res = Async.WithRetry(kinesis.DescribeStreamAsync(req) |> Async.AwaitTask, 2)
+                match res with 
+                | Success res when not res.StreamDescription.HasMoreShards -> 
+                    let shards   = (res.StreamDescription.Shards :: acc) |> Seq.collect id |> Seq.toArray
+                    let shardIds = shards |> Seq.map (fun shard -> shard.ShardId) |> Seq.toArray
 
-            return res.StreamDescription.Shards
-        }
+                    logger.DebugFormat("Stream [{0}] has [{1}] shards: [{2}]", streamName, shardIds.Length, csv shardIds)
+                    return Success (res.StreamDescription.StreamStatus.Value, shards, shardIds)
+                | Success res ->
+                    let lastShardId = res.StreamDescription.Shards |> Seq.last
+                    return! describeStream (res.StreamDescription.Shards :: acc) (Some lastShardId.ShardId)
+                | Failure (Flatten exn) -> 
+                    logger.Error(sprintf "Failed to get shards for stream [%s]" streamName, exn)
+                    return Failure exn
+            }
+            
+        async { return! describeStream [] None }
 
     /// Returns the shard iterator for the specified shard in the stream
     let getShardIterator (kinesis : IAmazonKinesis) 
@@ -365,9 +380,9 @@ module internal DynamoDBUtils =
         
             let res = dynamoDB.CreateTable(req)
             logDebug "Created state table [{0}], current status [{1}], read throughput [{2}], write throughput [{3}]"
-                        [| tableName; res.TableDescription.TableStatus; 
-                           res.TableDescription.ProvisionedThroughput.ReadCapacityUnits;
-                           res.TableDescription.ProvisionedThroughput.WriteCapacityUnits |]
+                      [| tableName; res.TableDescription.TableStatus; 
+                         res.TableDescription.ProvisionedThroughput.ReadCapacityUnits;
+                         res.TableDescription.ProvisionedThroughput.WriteCapacityUnits |]
 
             Success ()
         with
@@ -576,7 +591,7 @@ module internal DynamoDBUtils =
             let! _ = dynamoDB.UpdateItemAsync(req) |> Async.AwaitTask
 
             logDebug "Issued handover request for shard [{0}] from worker [{1}] to worker [{2}] in table [{3}], expiring at [{4}]" 
-                        [| shardId; fromWorkerId; toWorkerId; tableName; expiry |]
+                     [| shardId; fromWorkerId; toWorkerId; tableName; expiry |]
         }
         |> Async.Catch
 
