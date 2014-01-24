@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Text;
-
+using Amazon;
 using ReactoKinesix.Model;
 
 using log4net.Config;
@@ -30,6 +30,9 @@ namespace ReactoKinesix.ExampleCs
     {
         static void Main()
         {
+            var awsKey = "";
+            var awsSecret = "";
+            var region = RegionEndpoint.USEast1;
             var appName = "YC-test";
             var streamName = "YC-test";
             var workerId = "PHANTOM-cs";
@@ -38,13 +41,9 @@ namespace ReactoKinesix.ExampleCs
 
             var processor = new MyProcessor();
 
-            var kinesis = Amazon.AWSClientFactory.CreateAmazonKinesisClient();
-            var dynamoDb = Amazon.AWSClientFactory.CreateAmazonDynamoDBClient();
-            var cloudWatch = Amazon.AWSClientFactory.CreateAmazonCloudWatchClient();
-
             Console.WriteLine("Starting client application...");
 
-            var app = ReactoKinesixApp.CreateNew(kinesis, dynamoDb, cloudWatch, appName, streamName, workerId, processor);
+            var app = ReactoKinesixApp.CreateNew(awsKey, awsSecret, region, appName, streamName, workerId, processor);
 
             app.OnInitialized += (_, evtArgs) => Console.WriteLine("Client application started");
             app.OnBatchProcessed += (_, evtArgs) => Console.WriteLine("Another batch processed...");
