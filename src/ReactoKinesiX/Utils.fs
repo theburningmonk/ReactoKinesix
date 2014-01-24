@@ -493,7 +493,7 @@ module internal DynamoDBUtils =
 
             logDebug "Getting current status of shard [{0}] from state table [{1}]" [| shardId; tableName |]
 
-            let! res = Async.WithRetry(dynamoDB.GetItemAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)            
+            let! res = Async.WithRetry(dynamoDB.GetItemAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
 
             match res with
             | Failure exn -> return Failure exn

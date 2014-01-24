@@ -21,9 +21,6 @@ open Amazon.Kinesis.Model
 open ReactoKinesix.Model
 open ReactoKinesix.Utils
 
-type OnInitializedDelegate    = delegate of obj * EventArgs -> unit
-type OnBatchProcessedDelegate = delegate of obj * EventArgs -> unit
-
 /// Represents a processor that is responsible for processing any records received from the stream.
 type IRecordProcessor = 
     /// Process a record

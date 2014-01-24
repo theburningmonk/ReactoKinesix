@@ -70,13 +70,15 @@ type Record =
             PartitionKey   = record.PartitionKey
         }
 
-/// Represents a handover request
 type HandoverRequest =
     {
         FromWorker  : string
         ToWorker    : string
         Expiry      : DateTime
     }
+  
+type OnInitializedDelegate    = delegate of obj * EventArgs -> unit
+type OnBatchProcessedDelegate = delegate of obj * EventArgs -> unit
 
 [<AutoOpen>]
 module Exceptions =
@@ -169,8 +171,6 @@ module internal InternalModel =
         | Success   of 'Success
         | Failure   of 'Failure
 
-    type ProcessResult  = Result<SequenceNumber, SequenceNumber * Exception>
-    
     type internal StoppedReason =
         | UserTriggered          = 1    // shard processor was stopped by a user
         | ShardClosed            = 2    // shard processor has stopped because its shard was closed
