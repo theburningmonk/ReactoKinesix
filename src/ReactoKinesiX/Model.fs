@@ -127,7 +127,7 @@ module internal InternalModel =
         | SequenceNumber of string
         override this.ToString () = match this with | SequenceNumber seqNum -> seqNum
 
-    type IteratorType   = 
+    type IteratorType = 
         | TrimHorizon                               // starting at the trim horizon (i.e. earliest record available)
         | AtSequenceNumber      of SequenceNumber   // starting at the given sequence number
         | AfterSequenceNumber   of SequenceNumber   // starting immediate after the given sequence number        
@@ -139,10 +139,10 @@ module internal InternalModel =
             | AfterSequenceNumber seqNum -> "After (" + seqNum.ToString() + ")"
             | Latest                     -> "Latest"
 
-    type Iterator       = 
-        | IteratorToken         of string           // using the next iterator token from the previous call
-        | NoIteratorToken       of IteratorType     // fetch a new iterator token
-        | EndOfShard                                // the shard is closed and no more iterator can be returned
+    type Iterator = 
+        | IteratorToken     of string           // using the next iterator token from the previous call
+        | NoIteratorToken   of IteratorType     // fetch a new iterator token
+        | EndOfShard                            // the shard is closed and no more iterator can be returned
         override this.ToString () =
             match this with
             | IteratorToken token       -> "IteratorToken(" + token + ")"
@@ -223,3 +223,7 @@ module internal InternalModel =
             metric.Sum     <- metric.Sum + n
             metric.Count   <- metric.Count + 1.0
             metric.Average <- metric.Sum / metric.Count
+
+    type MetricsAgentMessage =
+        | IncrMetric    of DateTime * Dimension[] * StandardUnit * string * int
+        | Flush         of AsyncReplyChannel<Metric[]>

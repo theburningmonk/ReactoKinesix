@@ -100,6 +100,23 @@ module internal Utils =
         match exn with
         | :? AggregateException as aggrExn -> Flatten aggrExn.InnerException
         | exn -> exn
+    
+    /// Applies memoization to the supplied function f
+    let memoize (f : 'a -> 'b) =
+        let cache = new Dictionary<'a, 'b>()
+
+        let memoizedFunc (input : 'a) =
+            // check if there is a cached result for this input
+            match cache.TryGetValue(input) with
+            | true, x   -> x
+            | false, _  ->
+                // evaluate and add result to cache
+                let result = f input
+                cache.Add(input, result)
+                result
+
+        // return the memoized version of f
+        memoizedFunc
 
     type Observable with
         /// Returns an IObservable<T> from an Async<T> (from http://cs.hubfs.net/topic/None/59632#comment-72865)
@@ -190,20 +207,15 @@ module internal CloudWatchUtils =
     let private logger   = LogManager.GetLogger("CloudWatchUtils")
     let private logDebug = logDebug logger
     let private logWarn  = logWarn logger
-    
-    // this metric name and dimensions would make our custom metrics go into the same place as the rest of the Kinesis metrics
-    let metricNamespace, streamDimensionName, shardDimensionName = "Reacto-KinesiX", "StreamName", "ShardId"
-    let successMetricName, errorMetricName, handoverMetricName, fetchedMetricName = 
-        "Process.Success", "Process.Error", "Handover", "Fetched"
 
     // batch up metrics into groups of 20
     let private batchSize = 20
 
     /// Push a bunch of metrics
-    let pushMetrics (cloudWatch : IAmazonCloudWatch) (metrics : Metric[]) =
+    let pushMetrics (cloudWatch : IAmazonCloudWatch) ns (metrics : Metric[]) =
         let groups   = metrics |> Seq.groupsOfAtMost batchSize |> Seq.toArray
         let requests = groups  |> Array.map (fun metrics -> 
-            let req  = new PutMetricDataRequest(Namespace = metricNamespace)
+            let req  = new PutMetricDataRequest(Namespace = ns)
             let data = metrics |> Seq.map (fun m -> 
                         let stats = new StatisticSet(Minimum = m.Min, Maximum = m.Max, Sum = m.Sum, SampleCount = m.Count)
                         let datum = new MetricDatum(MetricName      = m.MetricName, 

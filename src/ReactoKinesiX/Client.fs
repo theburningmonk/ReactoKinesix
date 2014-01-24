@@ -72,12 +72,15 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
     let disposeInvoked = ref 0
     let cts = new CancellationTokenSource();
 
+    let metricsAgent : MetricsAgent = app.MetricsAgent
+
     do logDebug "Starting shard processor..." [||]
 
     //#region Events
 
     let batchReceivedEvent          = new Event<Iterator * Record[]>()  // when a new batch of records have been received
     let recordProcessedEvent        = new Event<Record>()               // when a record has been processed by processor
+    let recordErrorEvent            = new Event<Record * Exception>()   // when an error is encountered when processing a record
     let batchProcessedEvent         = new Event<int * Iterator>()       // when a batch has finished processing with the iterator for next batch
 
     let initializedEvent            = new Event<unit>()           // when the shard processor has been initialized
@@ -188,7 +191,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
             processor.Process(record)
 
             logDebug "Processed record [PartitionKey:{0}, SequenceNumber:{1}]" logArgs
-
+            
             recordProcessedEvent.Trigger(record)
             Success(SequenceNumber record.SequenceNumber)
 
@@ -213,7 +216,9 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
         try
             tryProcess record
         with
-        | ex ->
+        | exn ->
+            recordErrorEvent.Trigger(record, exn)
+
             match getErrorHandlingMode record with
             | Success (RetryAndSkip n as mode) 
             | Success (RetryAndStop n as mode) -> 
@@ -317,6 +322,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
     let fetchSub        = fetch.Subscribe(fun (_, iterator) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
 
     let received        = batchReceivedEvent.Publish
+    let receivedSub     = received.Subscribe(fun (_, records : Record[]) -> metricsAgent.TrackFetched(shardId, records.Length))
 
     // after we have received the next batch of records, wait for the nextBatch signal.
     // this could include a forced period of delay if the last batch was empty even if this batch is not empty, this is so that
@@ -325,6 +331,9 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                             .Zip(nextBatch, fun receivedBatch _ -> receivedBatch)
                             .TakeUntil(stopProcessing)
     let processingSub   = processing.Subscribe(fun args -> processBatch args)
+
+    let recordProcessedSub = recordProcessedEvent.Publish.Subscribe(fun record -> metricsAgent.TrackSuccess(shardId, record.Data.Length))
+    let recordErrorSub     = recordErrorEvent.Publish.Subscribe(fun _ -> metricsAgent.TrackError(shardId))
 
     // only deal with the shard closed event the first time we see it
     let _ = shardClosedEvent.Publish.Take(1).Subscribe(onShardClosed)
@@ -407,6 +416,8 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
                     | HandingOver(_, fromWorker', toWorker', seqNum) when toWorker' = app.WorkerId ->
                         logDebug "Accepting shard handover from worker [{0}]" [| fromWorker' |]
+                        metricsAgent.TrackHandover()
+
                         do! takeOver fromWorker' seqNum
                     | HandingOver(_, fromWorker', toWorker', _) ->
                         logDebug "Shard is being handed over from worker [{0}] to worker [{1}]" [| fromWorker'; toWorker' |]
@@ -445,7 +456,8 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
             cts.Cancel()
 
-            [| heartbeatSub; fetchSub; processingSub; retryInitSub; handoverCheckSub; (cts :> IDisposable) |]
+            [| heartbeatSub; fetchSub; receivedSub; processingSub; recordProcessedSub; recordErrorSub;
+               retryInitSub; handoverCheckSub; (cts :> IDisposable) |]
             |> Array.iter (fun x -> x.Dispose())
 
             logDebug "Disposed." [||]
@@ -494,10 +506,11 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
     let initializedEvent                = new Event<OnInitializedDelegate, EventArgs>()
     let batchProcessedEvent             = new Event<OnBatchProcessedDelegate, EventArgs>()
     let shardProcessorCountChangedEvent = new Event<int>()  // when the number of shard processors have changed
- 
+   
     let streamName, workerId = StreamName streamName, WorkerId workerId
     let tableName            = TableName <| sprintf "%s%s" appName config.DynamoDBTableSuffix
     let mutable processor    = processor
+    let metricsAgent         = new MetricsAgent(cloudWatch, appName, streamName)
     
     let runScheduledTask freq job = 
         let wrapped = job |> Async.Catch |> Async.Ignore
@@ -505,7 +518,7 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
         
     let updateShardProcessors (shardIds : string seq) (update : ShardId -> Async<unit>) = 
         async {
-            do! shardIds                
+            do! shardIds
                 |> Seq.map (fun shardId -> update (ShardId shardId))
                 |> Async.Parallel
                 |> Async.Ignore
@@ -740,17 +753,20 @@ and ReactoKinesixApp private (kinesis    : IAmazonKinesis,
             cts.Cancel()
             cts.Dispose()
 
+            (metricsAgent :> IDisposable).Dispose()
+
             runningApps.TryRemove(appName) |> ignore
 
             logDebug "Disposed" [||]
 
-    member internal this.Kinesis    = kinesis
-    member internal this.DynamoDB   = dynamoDB
-    member internal this.Config     = config
-    member internal this.TableName  = tableName
-    member internal this.StreamName = streamName
-    member internal this.WorkerId   = workerId
-    member internal this.Processor  = processor
+    member internal this.Kinesis      = kinesis
+    member internal this.DynamoDB     = dynamoDB
+    member internal this.Config       = config
+    member internal this.TableName    = tableName
+    member internal this.StreamName   = streamName
+    member internal this.WorkerId     = workerId
+    member internal this.Processor    = processor
+    member internal this.MetricsAgent = metricsAgent
     
     member internal this.MarkAsClosed shardId   = markAsClosed shardId |> ignore
     member internal this.StopProcessing shardId = stopShardProcessor shardId |> ignore
