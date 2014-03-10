@@ -96,10 +96,12 @@ module internal Utils =
     
     // since the async methods from the AWSSDK excepts with AggregateException which is not all that useful, hence
     // this active pattern which unwraps any AggregateException
-    let rec (|Flatten|) (exn : Exception) =
+    let rec flattenExn (exn : Exception) =
         match exn with
-        | :? AggregateException as aggrExn -> Flatten aggrExn.InnerException
+        | :? AggregateException as aggrExn -> flattenExn aggrExn.InnerException
         | exn -> exn
+
+    let (|Flatten|) exn = flattenExn exn
     
     /// Applies memoization to the supplied function f
     let memoize (f : 'a -> 'b) =
@@ -158,7 +160,7 @@ module internal Utils =
                     let! res = computation |> Async.Catch
                     match res with
                     | Choice1Of2 x -> return Success x
-                    | Choice2Of2 _ when retryCount <= maxRetries -> 
+                    | Choice2Of2 _ when retryCount < maxRetries -> 
                         do! calcDelay retryCount |> Async.Sleep
                         return! loop (retryCount + 1)
                     | Choice2Of2 (Flatten exn) -> return Failure exn
@@ -347,10 +349,8 @@ module internal DynamoDBUtils =
     let private serializeHandoverReq   = serialize<HandoverRequest>
     let private deserializeHandoverReq = deserialize<HandoverRequest>
     
-    let private (|NoShard|ClosedShard|Shard|) (item : Dictionary<string, AttributeValue>) =
-        let shardId = ShardId item.[shardIdAttr].S
-
-        if item = null || item.Count = 0 then NoShard(shardId)
+    let private (|NoShard|ClosedShard|Shard|) (item : Dictionary<string, AttributeValue>) =        
+        if item = null || item.Count = 0 then NoShard
         else 
             // the shard creation should always ensure that worker ID and heartbeat is created
             // but the checkpoint is only set the first time we were able to get records from
@@ -365,8 +365,8 @@ module internal DynamoDBUtils =
                             | _ -> None
 
             match isClosed with
-            | Some boolStr when parseBool boolStr -> ClosedShard(shardId)
-            | _ -> Shard(shardId, WorkerId workerId, fromHeartbeatTimestamp heartbeat, checkpoint, handoverReq)
+            | Some boolStr when parseBool boolStr -> ClosedShard
+            | _ -> Shard(WorkerId workerId, fromHeartbeatTimestamp heartbeat, checkpoint, handoverReq)
 
     /// Returns the list of tables that currently exist in DynamoDB
     let private doesTableExist (dynamoDB : IAmazonDynamoDB) (TableName tableName) =
@@ -402,7 +402,7 @@ module internal DynamoDBUtils =
 
             Success ()
         with
-        | :? ResourceInUseException as exn -> 
+        | :? Amazon.DynamoDBv2.Model.ResourceInUseException as exn -> 
             // already exists (perhaps race condition with multiple workers trying to create table at the same time)
             logWarn exn "(Possible race condition) State table [{0}] already exists" [| tableName |]
             Success ()
@@ -410,9 +410,12 @@ module internal DynamoDBUtils =
 
     /// Initializes the application state table if necessary and returns the table name
     let initStateTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) tableName =
-        match doesTableExist dynamoDB tableName with
-        | true -> Success ()
-        | _    -> createTable dynamoDB config tableName
+        try
+            match doesTableExist dynamoDB tableName with
+            | true -> Success ()
+            | _    -> createTable dynamoDB config tableName
+        with
+        | exn -> Failure exn
 
     /// Waits till the DynamoDB table is ready
     let rec awaitStateTableReady (dynamoDB : IAmazonDynamoDB) (TableName tableName as tn) =
@@ -459,10 +462,10 @@ module internal DynamoDBUtils =
         }
 
     /// Returns the current status of the shard given the item retrieved from DynamoDB
-    let private getShardStatusInternal heartbeatTimeout = function
-        | NoShard(shardId)      -> ShardStatus.NotFound(shardId)
-        | ClosedShard(shardId)  -> ShardStatus.Closed(shardId)
-        | Shard(shardId, workerId, heartbeat, checkpoint, handoverReq) ->
+    let private getShardStatusInternal shardId heartbeatTimeout = function
+        | NoShard       -> ShardStatus.NotFound(shardId)
+        | ClosedShard   -> ShardStatus.Closed(shardId)
+        | Shard(workerId, heartbeat, checkpoint, handoverReq) ->
             let now = DateTime.UtcNow
 
             let seqNum = match checkpoint with 
@@ -485,10 +488,10 @@ module internal DynamoDBUtils =
     let getShardStatus (dynamoDB : IAmazonDynamoDB) 
                        (config   : ReactoKinesixConfig)
                        (TableName tableName)
-                       (ShardId   shardId) =
+                       ((ShardId   shardIdStr) as shardId) =
         async {
             let req = new GetItemRequest(TableName = tableName, ConsistentRead = true)
-            req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
+            req.Key.Add(shardIdAttr, new AttributeValue(S = shardIdStr))
             req.AttributesToGet.AddRange([| shardIdAttr; workerIdAttr; checkpointAttr; lastHeartbeatAttr; isClosedAttr; handoverReqAttr |])
 
             logDebug "Getting current status of shard [{0}] from state table [{1}]" [| shardId; tableName |]
@@ -497,7 +500,7 @@ module internal DynamoDBUtils =
 
             match res with
             | Failure exn -> return Failure exn
-            | Success res -> return Success <| getShardStatusInternal config.HeartbeatTimeout res.Item
+            | Success res -> return Success <| getShardStatusInternal shardId config.HeartbeatTimeout res.Item
         }
 
     /// Returns the current status fo all active (not-closed) shards
@@ -519,9 +522,15 @@ module internal DynamoDBUtils =
                 let! res = Async.WithRetry(dynamoDB.ScanAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
 
                 match res with
-                // when LastEvaluatedKey is null it means the last page of results have been process and there's no more data to be retrieved
-                | Success res when res.LastEvaluatedKey = null ->
-                    let shardStatuses = (res.Items :: acc) |> Seq.collect id |> Seq.map (getShardStatusInternal config.HeartbeatTimeout) |> Seq.toArray
+                // when LastEvaluatedKey is null/empty it means the last page of results have been process and there's no more data to be retrieved
+                | Success res when res.LastEvaluatedKey = null || res.LastEvaluatedKey.Count = 0 ->
+                    let shardsAsItems = (res.Items :: acc) |> Seq.collect id                     
+                    let shardStatuses = 
+                        shardsAsItems 
+                        |> Seq.map (fun items ->
+                            let shardId = ShardId items.[shardIdAttr].S
+                            getShardStatusInternal shardId config.HeartbeatTimeout items)
+                        |> Seq.toArray
                     return Success shardStatuses
                 | Success res ->
                     return! scanTable (res.Items :: acc) (Some res.LastEvaluatedKey)

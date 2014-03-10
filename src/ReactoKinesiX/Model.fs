@@ -56,6 +56,9 @@ type ReactoKinesixConfig () =
     /// How frequently should we check for pending handover requests for a shard. Default is 1 minute.
     member val CheckPendingHandoverRequestFrequency = TimeSpan.FromMinutes(1.0) with get, set
 
+    /// How to handle errors? Default is to retry twice and then skip.
+    member val ErrorHandlingMode       = RetryAndSkip(2) with get, set
+
 /// Represents a record received from the stream
 type Record = 
     {
@@ -69,6 +72,20 @@ type Record =
             Data           = record.Data.ToArray()
             PartitionKey   = record.PartitionKey
         }
+
+type Status = 
+    | Success
+    | Failure   of Exception
+
+/// Result of processing a batch of records
+type ProcessRecordsResult =
+    {
+        /// Was the processing successful?
+        Status      : Status
+
+        /// Whether a checkpoint should be placed against the last record in the batch
+        Checkpoint  : bool
+    }
 
 type HandoverRequest =
     {

@@ -99,10 +99,10 @@ type internal MetricsAgent (cloudWatch : IAmazonCloudWatch,
         let shardDims, now = getShardDims shardId, DateTime.UtcNow
         agent.Post <| IncrMetric(now, shardDims, StandardUnit.Count, fetchedMetricName, count)
 
-    member this.TrackSuccess (ShardId shardId, payloadSize : int) = 
+    member this.TrackSuccess (ShardId shardId, count : int, totalPayloadSize : int) = 
         let shardDims, now = getShardDims shardId, DateTime.UtcNow
-        agent.Post <| IncrMetric(now, shardDims, StandardUnit.Count, successMetricName, 1)
-        agent.Post <| IncrMetric(now, shardDims, StandardUnit.Bytes, sizeMetricName, payloadSize)
+        agent.Post <| IncrMetric(now, shardDims, StandardUnit.Count, successMetricName, count)
+        agent.Post <| IncrMetric(now, shardDims, StandardUnit.Bytes, sizeMetricName, totalPayloadSize)
     
     member this.TrackError (ShardId shardId) = 
         let shardDims, now = getShardDims shardId, DateTime.UtcNow
