@@ -9,19 +9,19 @@
 // for binaries output to root bin folder please add the filename only to the 
 // referenceBinaries list below in order to generate documentation for the binaries.
 // (This is the original behaviour of ProjectScaffold prior to multi project support)
-let referenceBinaries = []
+let referenceBinaries = [ "ReactoKinesix.dll" ]
 // Web site location for the generated documentation
 let website = "/ReactoKinesix"
 
-let githubLink = "http://github.com/Update GitHome in build.fsx/ReactoKinesix"
+let githubLink = "http://github.com/theburningmonk/ReactoKinesix"
 
 // Specify more information about your project
 let info =
-  [ "project-name", "ReactoKinesix"
-    "project-author", "on top of the Amazon Kinesis service."
+  [ "project-name",    "ReactoKinesix"
+    "project-author",  "Yan Cui"
     "project-summary", "A Rx-based .Net client library for Amazon Kinesis"
-    "project-github", githubLink
-    "project-nuget", "http://nuget.org/packages/ReactoKinesix" ]
+    "project-github",  githubLink
+    "project-nuget",   "http://nuget.org/packages/ReactoKinesix" ]
 
 // --------------------------------------------------------------------------------------
 // For typical project, no changes are needed below

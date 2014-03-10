@@ -1,38 +1,22 @@
-(*** hide ***)
-// This block of code is omitted in the generated HTML documentation. Use 
-// it to define helpers that you do not want to show in the documentation.
-#I "../../bin"
-
 (**
-ReactoKinesix
-======================
+# What is ReactoKinesix?
 
-Documentation
+It's a [Rx](https://rx.codeplex.com/)-based .Net client library for [Amazon Kinesis](http://aws.amazon.com/kinesis/).
 
-<div class="row">
-  <div class="span1"></div>
-  <div class="span6">
-    <div class="well well-small" id="nuget">
-      The ReactoKinesix library can be <a href="https://nuget.org/packages/ReactoKinesix">installed from NuGet</a>:
-      <pre>PM> Install-Package ReactoKinesix</pre>
-    </div>
-  </div>
-  <div class="span1"></div>
-</div>
+This client library makes it easy for you to build a record-consuming real time applications on top of the Amazon Kinesis service.
 
-Example
--------
+It takes care of the plumbing required to track your progress and manage sharding changes in the underlying stream, as well as giving you different options to handle errors on a record-by-record basis.
 
-This example demonstrates using a function defined in this sample library.
+Scaling out your application is also supported and handled by the library, as new nodes start the processing of shards will be spread and load balanced automatically.
 
-*)
-#r "ReactoKinesix.dll"
-open ReactoKinesix
+This guide contains the following sections:
 
-printfn "hello = %i" <| Library.hello 0
+- [Getting Started](getting-started.html)
+- [Features](features.html)
+- [Error Handling](error-handling.html)
+- [Distributed Processing](distributed-processing.html)
 
-(**
-Some more info
+You can report issues [here](https://github.com/theburningmonk/ReactoKinesiX/issues).
 
 Samples & documentation
 -----------------------
@@ -59,9 +43,9 @@ The library is available under Public Domain license, which allows modification 
 redistribution for both commercial and non-commercial purposes. For more information see the 
 [License file][license] in the GitHub repository. 
 
-  [content]: https://github.com/fsprojects/ReactoKinesix/tree/master/docs/content
-  [gh]: https://github.com/fsprojects/ReactoKinesix
-  [issues]: https://github.com/fsprojects/ReactoKinesix/issues
-  [readme]: https://github.com/fsprojects/ReactoKinesix/blob/master/README.md
-  [license]: https://github.com/fsprojects/ReactoKinesix/blob/master/LICENSE.txt
+  [content]: https://github.com/theburningmonk/ReactoKinesix/tree/master/docs/content
+  [gh]: https://github.com/theburningmonk/ReactoKinesix
+  [issues]: https://github.com/theburningmonk/ReactoKinesix/issues
+  [readme]: https://github.com/theburningmonk/ReactoKinesix/blob/master/README.md
+  [license]: https://github.com/theburningmonk/ReactoKinesix/blob/master/LICENSE.txt
 *)
