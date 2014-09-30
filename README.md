@@ -36,34 +36,30 @@ To process incoming records, you need to provide an implementation for the `IRec
 	<tbody>
 		<tr>
 			<td><strong>Process</strong></td>
-			<td><p>Process a <i>record</i> received from the <i>Stream</i>.</p></td>
-		</tr>
-		<tr>
-			<td><strong>GetErrorHandlingMode</strong></td>
-			<td><p>If the processor failed to processor a record due to unhanded exception, this method will be invoked to give you the chance to decide how the error should be handled. 
-				</p>There are two available error handling modes:</p>
+			<td><p>Process a batch of <i>records</i> received from the <i>Kinesis Stream</i>. This method returns an instance of <i>ProcessRecordsResult</i> where you can indicate:</p>
 				<ul>
-					<li>Retry n times and then <strong>skip</strong> to the next record</li>
-					<li>Retry n times and then <strong>stop</strong> processing further records from this <i>shard</i></li>
+					<li>whether the processing was successful, if an unhandled exception is thrown from this method then this defaults to <i>Status.Failure</i>, and</li>
+					<li>if a checkpoint should be placed on the shard immediatel after the last record in the batch. If the current worker terminates prematurely (due to hardware failure, for instance) then another worker can resume processing of the shard from the last checkpoint</li>
 				</ul>
-				<p>In both cases, if the number of retry attempts is reached and the record still cannot be processed then the <i>OnMaxRetryExceeded</i> method below will be invoked to give you one last chance to deal with the failing <i>record</i> before we either move onto the next <i>record</i> or stop processing the <i>shard</i> altogether.				
 			</td>
-		</tr>
+		</tr>		
 		<tr>
 			<td><strong>OnMaxRetryExceeded</strong></td>
-			<td><p>Last chance to deal with a failing <i>record</i> when the number of retry attempts specified by the <i>GetErrorHandlingMode</i> method above has been reached.</p>
+			<td><p>Last chance to deal with a failing batch of <i>records</i> when the number of retry attempts specified in the configuration has been reached.</p>
 				<p>For example, you might choose to:</p>
 				<ul>
-					<li>save the data in the <i>record</i> onto <i>Amazon SQS</i> for processing later</li>
+					<li>push the data in the <i>records</i> to <i>Amazon SQS</i> for processing later</li>
 					<li>send out notification via <i>Amazon SNS</i>
 					<li>...
 				</ul>
 			</td>
 		</tr>
 	</tbody>
-</table>
+</table> 
 
-To start, you can create a client application by calling the static method `ReactoKinesixApp.CreateNew` which returns a running instance of `IReactoKinesixApp` that will start processing *records* from the *stream* straight away!
+To start, you can create a client application by calling the static method `ReactoKinesixApp.CreateNew` which returns a running instance of `IReactoKinesixApp` that will start processing *records* from the *stream* straight away.
+
+You will notice that the `ReactoKinesixApp.CreateNew` requires an instance of `IRecordProcessorFactory` rather than an instance of `IRecordProcessor`. The rationale for this decision is that it enables 
 
 #### Tracking the state of your client application
 
@@ -111,7 +107,7 @@ let app = ReactoKinesixApp.CreateNew(awsKey, awsSecret, region, appName, streamN
 
 #### Stopping and Starting processing of a shard
 
-If for some reason you need to stop processing a *shard*, and restart it later, you can call the `StopProcessing`and `StartProcessing` methods on a running `IReactoKinesixApp` instance.
+If for some reason you need to stop processing a *shard*, and restart it later, you can call the `IReactoKinesixApp.StopProcessing` and `IReactoKinesixApp.StartProcessing` methods with a *shard ID*.
 
 > **Note**: when stopping processing of a *shard*, in order to avoid lost of progress and potentially process the same *records* more than once when processing is resumed, processing of the *shard* will come to a stop only after we have managed to finish processing the current batch of *records* that have been received and that the checkpoint has been updated successfully in *Amazon DynamoDB*.  
 
@@ -119,9 +115,9 @@ If for some reason you need to stop processing a *shard*, and restart it later, 
 
 #### Changing processor on the fly
 
-You can also change the `IRecordProcessor` implementation used by the client application at runtime, by calling the `ChangeProcessor` method on a running `IReactoKinesixApp` instance and the change will take effect straight away.
+You can also change the `IRecordProcessorFactory` implementation used by the client application at runtime, by calling the `IReactoKinesixApp.ChangeProcessorFactory` method.
 
-> **Note**: if you are running the client application on multiple nodes then you'll need to call the `ChangeProcessor` method on all the nodes.
+> **Note**: if you are running the client application on multiple nodes then you'll need to call the `IReactoKinesixApp.ChangeProcessorFactory` method on all the nodes.
 
 #### Stopping the client application
 
@@ -210,6 +206,11 @@ Whilst you don't need to specify a configuration when creating a new client appl
 			<td>1 minute</td>
 			<td>How frequently should we check for pending handover requests for a shard.</td>
 		</tr>
+		<tr>
+			<td>ErrorHandlingMode</td>
+			<td>Retry twice and then skip</td>
+			<td>How to handle errors.</td>
+		</tr>
 	</tbody>
 </table> 
 
@@ -223,20 +224,17 @@ If you need to use a different configuration to the default, then simply create 
 
 ## Error Handling
 
-As mentioned in the [**Getting Started**](#getting-started) section of this guide, the `IRecordProcessor` interface requires you to implement these three methods:
+As mentioned in the [**Getting Started**](#getting-started) section of this guide, the `IRecordProcessor` interface requires you to implement these methods:
 - `Process`
-- `GetErrorHandlingMode`
 - `OnMaxRetryExceeded`
 
-if an error is thrown by your implementation of `IRecordProcessor.Process` when processing a record then the library will call the `IRecordProcessor.GetErrorHandlingMode` method to give you the opportunity to decide how to handle the exception for this particular record.
-
-You can choose to retry the record a number of times and then either 
+Via the configuration, you can choose to retry on error a number of times and then either 
 - skip the record
 - stop processing this shard altogether 
 
 if the specified retries have been reached and the error still persists then the library will proceed to call the `IRecordProcessor.OnMaxRetryExceeded` method to give you a last chance to handle the *record* before we skip to the next *record* or stop processing the *shard*.
 
-> **Note**: if you specify a retry count of 0 then the *record* will not be retried before skipping/stopping.
+> **Note**: if you specify a retry count of 0 then the *records* will not be retried before skipping/stopping.
 
 > **Note**: you may want to ensure that the data carried by the failing *record* is not lost by implementing a mechanism to fall back to *Amazon SQS* in your implementation of `IRecordProcessor.OnMaxRetryExceeded`. 
 > 
