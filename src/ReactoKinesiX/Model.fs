@@ -1,6 +1,9 @@
 ﻿namespace ReactoKinesix.Model
 
 open System
+
+open Amazon.CloudWatch
+open Amazon.CloudWatch.Model
 open Amazon.DynamoDBv2.DataModel
 
 /// Representing the different modes in which to handle errors when processing records
@@ -53,6 +56,9 @@ type ReactoKinesixConfig () =
     /// How frequently should we check for pending handover requests for a shard. Default is 1 minute.
     member val CheckPendingHandoverRequestFrequency = TimeSpan.FromMinutes(1.0) with get, set
 
+    /// How to handle errors? Default is to retry twice and then skip.
+    member val ErrorHandlingMode       = RetryAndSkip(2) with get, set
+
 /// Represents a record received from the stream
 type Record = 
     {
@@ -67,13 +73,29 @@ type Record =
             PartitionKey   = record.PartitionKey
         }
 
-/// Represents a handover request
+type Status = 
+    | Success
+    | Failure   of Exception
+
+/// Result of processing a batch of records
+type ProcessRecordsResult =
+    {
+        /// Was the processing successful?
+        Status      : Status
+
+        /// Whether a checkpoint should be placed against the last record in the batch
+        Checkpoint  : bool
+    }
+
 type HandoverRequest =
     {
         FromWorker  : string
         ToWorker    : string
         Expiry      : DateTime
     }
+  
+type OnInitializedDelegate    = delegate of obj * EventArgs -> unit
+type OnBatchProcessedDelegate = delegate of obj * EventArgs -> unit
 
 [<AutoOpen>]
 module Exceptions =
@@ -124,7 +146,7 @@ module internal InternalModel =
         | SequenceNumber of string
         override this.ToString () = match this with | SequenceNumber seqNum -> seqNum
 
-    type IteratorType   = 
+    type IteratorType = 
         | TrimHorizon                               // starting at the trim horizon (i.e. earliest record available)
         | AtSequenceNumber      of SequenceNumber   // starting at the given sequence number
         | AfterSequenceNumber   of SequenceNumber   // starting immediate after the given sequence number        
@@ -136,10 +158,10 @@ module internal InternalModel =
             | AfterSequenceNumber seqNum -> "After (" + seqNum.ToString() + ")"
             | Latest                     -> "Latest"
 
-    type Iterator       = 
-        | IteratorToken         of string           // using the next iterator token from the previous call
-        | NoIteratorToken       of IteratorType     // fetch a new iterator token
-        | EndOfShard                                // the shard is closed and no more iterator can be returned
+    type Iterator = 
+        | IteratorToken     of string           // using the next iterator token from the previous call
+        | NoIteratorToken   of IteratorType     // fetch a new iterator token
+        | EndOfShard                            // the shard is closed and no more iterator can be returned
         override this.ToString () =
             match this with
             | IteratorToken token       -> "IteratorToken(" + token + ")"
@@ -166,8 +188,6 @@ module internal InternalModel =
         | Success   of 'Success
         | Failure   of 'Failure
 
-    type ProcessResult  = Result<SequenceNumber, SequenceNumber * Exception>
-    
     type internal StoppedReason =
         | UserTriggered          = 1    // shard processor was stopped by a user
         | ShardClosed            = 2    // shard processor has stopped because its shard was closed
@@ -183,3 +203,44 @@ module internal InternalModel =
         | AddKnownShard         of ShardId * AsyncReplyChannel<unit>
         | MarkAsClosed          of ShardId * AsyncReplyChannel<unit>
         | RemoveKnownShard      of ShardId * AsyncReplyChannel<unit>
+
+    type Metric = 
+        {
+            Dimensions      : Dimension[]
+            MetricName      : string
+            Timestamp       : DateTime
+            Unit            : StandardUnit
+            mutable Average : double
+            mutable Sum     : double
+            mutable Max     : double
+            mutable Min     : double
+            mutable Count   : double
+        }
+
+        static member Init (timestamp : DateTime, dimensions : Dimension[], unit, metricName, n) =
+            { 
+                Dimensions  = dimensions
+                MetricName  = metricName
+                Timestamp   = timestamp
+                Unit        = unit
+                Average     = n
+                Sum         = n
+                Max         = n
+                Min         = n
+                Count       = 1.0
+            }
+
+        member metric.AddDatapoint (n) =
+            match metric.Count with
+            | 0.0 -> metric.Max <- n
+                     metric.Min <- n
+            | _   -> metric.Max <- max metric.Max n
+                     metric.Min <- min metric.Min n
+
+            metric.Sum     <- metric.Sum + n
+            metric.Count   <- metric.Count + 1.0
+            metric.Average <- metric.Sum / metric.Count
+
+    type MetricsAgentMessage =
+        | IncrMetric    of DateTime * Dimension[] * StandardUnit * string * int
+        | Flush         of AsyncReplyChannel<Metric[]>

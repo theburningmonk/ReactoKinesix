@@ -24,6 +24,10 @@ Please familiarize yourself with how **Amazon Kinesis** works by looking through
 
 #### Getting Started
 
+Download and install the library from Nuget [here](https://www.nuget.org/packages/ReactoKinesix/).
+
+<a href="https://www.nuget.org/packages/ReactoKinesix/"><img src="https://raw.github.com/theburningmonk/ReactoKinesiX/develop/nuget/banner.png"/></a>
+
 This library enables you to create a client application which consumes and processes records that have been pushed to an *Amazon Kinesis* **stream** by taking care of most of the plumbing involved.
 
 To process incoming records, you need to provide an implementation for the `IRecordProcessor` interface which has the following methods:
@@ -315,6 +319,3 @@ As you can see, it took the same number of iterations to achieve essentially the
 Each of the workers routinely (based on the configured **CheckUnprocessedShardsFrequency**, see the [Configuring the client application](#configuring-the-client-application) section) checks to see if there are any *shards* that are not being processed based on the timestamp of the last heartbeat and the first worker that successfully updates the *DynamoDB* entry for the *shard* with its *worker ID* will resume responsibility of processing this *shard*. 
 
 So if a worker is terminated, the remaining workers will see this once the configured heartbeat time out has expired and one of them will succeed in taking over the processing of this *shard*.
-
-[![Bitdeli Badge](https://d2weczhvl823v0.cloudfront.net/theburningmonk/reactokinesix/trend.png)](https://bitdeli.com/free "Bitdeli Badge")
-
