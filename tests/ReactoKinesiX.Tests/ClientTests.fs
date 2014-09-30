@@ -21,7 +21,7 @@ open ReactoKinesix.Utils
 
 [<TestFixture>]
 type ``Given that an application is starting`` () = 
-    do BasicConfigurator.Configure()
+    do BasicConfigurator.Configure() |> ignore
 
     let doNothing = (fun _ -> ())
 
@@ -44,7 +44,7 @@ type ``Given that an application is starting`` () =
         let kinesis    = Mock<IAmazonKinesis>().Create()        
         let cloudWatch = Mock<IAmazonCloudWatch>().Create()
         let dynamoDb   = Mock<IAmazonDynamoDB>()
-                            .Setup(fun d -> <@ d.DescribeTable(any()) @>)
+                            .Setup(fun d -> <@ d.DescribeTable(any<DescribeTableRequest>()) @>)
                             .Raises(TestUtils.UnsafeInit<Amazon.DynamoDBv2.Model.InternalServerErrorException>())
                             .Create()
 

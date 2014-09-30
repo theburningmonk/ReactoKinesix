@@ -114,6 +114,15 @@ type KinesisStub () =
     member this.Streams = streams
     
     interface IAmazonKinesis with
+        member this.AddTagsToStream req                 = raise <| NotImplementedException()
+        member this.AddTagsToStreamAsync (req, _)       = raise <| NotImplementedException()
+
+        member this.ListTagsForStream req               = raise <| NotImplementedException()
+        member this.ListTagsForStreamAsync (req, _)     = raise <| NotImplementedException()
+
+        member this.RemoveTagsFromStream req            = raise <| NotImplementedException()
+        member this.RemoveTagsFromStreamAsync (req, _)  = raise <| NotImplementedException()
+
         //#region CreateStream
 
         member this.CreateStream req = 

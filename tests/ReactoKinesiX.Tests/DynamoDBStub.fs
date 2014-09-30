@@ -147,13 +147,38 @@ type DynamoDBStub () =
     member this.Tables = tables
 
     interface IAmazonDynamoDB with
-        member this.BatchGetItem req             = raise <| NotImplementedException()
-        member this.BatchGetItemAsync (req, _)   = raise <| NotImplementedException()
+        // #region BatchGetItem
 
-        member this.BatchWriteItem req           = raise <| NotImplementedException()
-        member this.BatchWriteItemAsync (req, _) = raise <| NotImplementedException()
+        member this.BatchGetItem (_items : Dictionary<string, KeysAndAttributes>) : BatchGetItemResponse = 
+            raise <| NotImplementedException()
+
+        member this.BatchGetItem (_items : Dictionary<string, KeysAndAttributes>, _returnCapacity) : BatchGetItemResponse = 
+            raise <| NotImplementedException()
+
+        member this.BatchGetItem (_req : BatchGetItemRequest) : BatchGetItemResponse = 
+            raise <| NotImplementedException()
+
+        member this.BatchGetItemAsync (_req, _) = 
+            raise <| NotImplementedException()
+
+        // #endregion
+
+        // #region BatchWriteItem
+
+        member this.BatchWriteItem (_req : Dictionary<string, List<WriteRequest>>) : BatchWriteItemResponse = 
+            raise <| NotImplementedException()
+
+        member this.BatchWriteItem (_req : BatchWriteItemRequest) : BatchWriteItemResponse = 
+            raise <| NotImplementedException()
+
+        member this.BatchWriteItemAsync (_req, _) = 
+            raise <| NotImplementedException()
+
+        // #endregion
 
         //#region CreateTable
+
+        member this.CreateTable (_tableName, _schema, _attrDefs, _throughput) = raise <| NotImplementedException()
 
         member this.CreateTable (req) =
             if tables.ContainsKey req.TableName then 
@@ -171,7 +196,10 @@ type DynamoDBStub () =
 
         //#region DeleteItem
 
-        member this.DeleteItem req =
+        member this.DeleteItem (_tableName, key)              = raise <| NotImplementedException()
+        member this.DeleteItem (_tableName, _key, _returnVal) = raise <| NotImplementedException()
+
+        member this.DeleteItem (req : DeleteItemRequest) =
             let table = getTable req.TableName
             table.DeleteItem req
 
@@ -184,7 +212,11 @@ type DynamoDBStub () =
 
         //#region DeleteTable
 
-        member this.DeleteTable (req) =
+        member this.DeleteTable (tableName : string) =
+            let req = new DeleteTableRequest(TableName = tableName)
+            (this :> IAmazonDynamoDB).DeleteTable(req)
+
+        member this.DeleteTable (req : DeleteTableRequest) =
             let table = getTable req.TableName
             if table.Status = TableStatus.CREATING || table.Status = TableStatus.UPDATING then 
                 raise <| TestUtils.UnsafeInit<Amazon.DynamoDBv2.Model.ResourceInUseException>()
@@ -201,7 +233,11 @@ type DynamoDBStub () =
 
         //#region DescribeTable
 
-        member this.DescribeTable req =
+        member this.DescribeTable tableName =
+            let table = getTable tableName            
+            new DescribeTableResponse(Table = table.TableDescription)
+
+        member this.DescribeTable (req : DescribeTableRequest) =
             let table = getTable req.TableName
             new DescribeTableResponse(Table = table.TableDescription)
 
@@ -211,6 +247,12 @@ type DynamoDBStub () =
         //#endregion
 
         //#region GetItem
+        
+        member this.GetItem(_tableName, _attributes) = 
+            raise <| NotImplementedException()
+
+        member this.GetItem(_tableName, _attributes, _consistentRead) = 
+            raise <| NotImplementedException()
 
         member this.GetItem req =
             let table = getTable req.TableName
@@ -228,7 +270,23 @@ type DynamoDBStub () =
         member this.ListTables () =
             new ListTablesResponse(TableNames = (tables.Keys |> Seq.toResizeArray))
 
-        member this.ListTables (req) = (this :> IAmazonDynamoDB).ListTables()
+        member this.ListTables (limit : int) =
+            new ListTablesResponse(TableNames = (tables.Keys |> Seq.take limit |> Seq.toResizeArray))
+
+        member this.ListTables (exclusiveStartTableName : string) =
+            let tableNames = tables.Keys 
+                             |> Seq.skipWhile ((<>) exclusiveStartTableName) 
+                             |> Seq.toResizeArray
+            new ListTablesResponse(TableNames = tableNames)
+
+        member this.ListTables (exclusiveStartTableName : string, limit : int) =
+            let tableNames = tables.Keys 
+                             |> Seq.skipWhile ((<>) exclusiveStartTableName)
+                             |> Seq.take limit
+                             |> Seq.toResizeArray
+            new ListTablesResponse(TableNames = tableNames)
+
+        member this.ListTables (req : ListTablesRequest) = (this :> IAmazonDynamoDB).ListTables()
 
         member this.ListTablesAsync (req, _) =
             async { return (this :> IAmazonDynamoDB).ListTables() } |> Async.StartAsTask
@@ -237,7 +295,10 @@ type DynamoDBStub () =
 
         //#region PutItem
 
-        member this.PutItem req = 
+        member this.PutItem (_tableName, _item)             = raise <| NotImplementedException()
+        member this.PutItem (_tableName, _item, _returnVal) = raise <| NotImplementedException()
+
+        member this.PutItem (req : PutItemRequest) = 
             let table = getTable req.TableName
             table.PutItem req
 
@@ -249,6 +310,12 @@ type DynamoDBStub () =
         //#endregion
         
         //#region UpdateItem
+
+        member this.UpdateItem (_tableName, _key, _attributeUpdates) =
+            raise <| NotImplementedException()
+
+        member this.UpdateItem (_tableName, _key, _attributeUpdates, _returnValue) =
+            raise <| NotImplementedException()
 
         member this.UpdateItem req =
             let table = getTable req.TableName
@@ -264,10 +331,23 @@ type DynamoDBStub () =
         member this.Query req                   = raise <| NotImplementedException()
         member this.QueryAsync (req, _)         = raise <| NotImplementedException()
 
-        member this.Scan req                    = raise <| NotImplementedException()
-        member this.ScanAsync (req, _)          = raise <| NotImplementedException()
+        member this.Scan (_tableName : string, _attributes : List<string>, _scanFilter : Dictionary<string, Condition>) = 
+            raise <| NotImplementedException()
+        
+        member this.Scan (_tableName : string, _scanFilter : Dictionary<string, Condition>) : ScanResponse = 
+            raise <| NotImplementedException()
 
-        member this.UpdateTable req             = raise <| NotImplementedException()
-        member this.UpdateTableAsync (req, _)   = raise <| NotImplementedException()
+        member this.Scan (_tableName : string, _attributes : List<string>) : ScanResponse = 
+            raise <| NotImplementedException()
+
+        member this.Scan (_req : ScanRequest) = 
+            raise <| NotImplementedException()
+
+        member this.ScanAsync (_req, _) = 
+            raise <| NotImplementedException()
+
+        member this.UpdateTable (_tableName, _throughput) = raise <| NotImplementedException()
+        member this.UpdateTable _req           = raise <| NotImplementedException()
+        member this.UpdateTableAsync (_req, _) = raise <| NotImplementedException()
 
         member this.Dispose () = ()

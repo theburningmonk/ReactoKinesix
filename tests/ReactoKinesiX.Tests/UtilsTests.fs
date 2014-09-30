@@ -351,7 +351,7 @@ type DynamoDBUtilsTests () =
 
         let dynamoDb = 
             Mock<IAmazonDynamoDB>()
-                .Setup(fun d -> <@ d.DescribeTable(is(fun req -> req.TableName = "table")) @>)
+                .Setup(fun d -> <@ d.DescribeTable(is(fun (req : DescribeTableRequest) -> req.TableName = "table")) @>)
                 .Returns(new DescribeTableResponse(Table = tableDescription))
                 .Create()
         
@@ -370,7 +370,7 @@ type DynamoDBUtilsTests () =
 
         let dynamoDb = 
             Mock<IAmazonDynamoDB>()
-                .Setup(fun d -> <@ d.DescribeTable(is(fun req -> req.TableName = "table")) @>)
+                .Setup(fun d -> <@ d.DescribeTable(is(fun (req : DescribeTableRequest) -> req.TableName = "table")) @>)
                 // because the ResourceNotFoundException has an internal constructor, hence this hack
                 .Raises(TestUtils.UnsafeInit<Amazon.DynamoDBv2.Model.ResourceNotFoundException>())
                 .Setup(fun d -> <@ d.CreateTable(is(fun req -> req.TableName = "table")) @>)
