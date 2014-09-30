@@ -36,7 +36,7 @@ type IRecordProcessor =
 /// Factory for record processor
 type IRecordProcessorFactory =
     /// Creates a new record processor for a shard with the specified shard ID
-    abstract member CreateNew           : string -> IRecordProcessor
+    abstract member CreateNew           : shardId : string -> IRecordProcessor
 
 /// Represents a client application that consumes records from a Kinesis stream.
 /// Please use the static method "ReactoKinesixApp.CreateNew(...)" to create a new Kinesis client application.
