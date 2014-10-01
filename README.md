@@ -236,13 +236,9 @@ if the specified retries have been reached and the error still persists then the
 
 > **Note**: if you specify a retry count of 0 then the *records* will not be retried before skipping/stopping.
 
-> **Note**: you may want to ensure that the data carried by the failing *record* is not lost by implementing a mechanism to fall back to *Amazon SQS* in your implementation of `IRecordProcessor.OnMaxRetryExceeded`. 
+> **Note**: you may want to ensure that the data carried by the failing *records* are not lost by implementing a mechanism to fall back to *Amazon SQS* in your implementation of `IRecordProcessor.OnMaxRetryExceeded`. This way you can continue processing the shard without losing data.
 > 
-> Once captured in *SQS* the data can be processed by another process and potentially retried for up to 14 days (*SQS*'s max retention period) although in practice if the data cannot be processed with so many attempts you probably want to send out an alert and have an engineer look into it! 
-
-> **Note**: depending on the data carried by the *record* you may choose to adopt a different error handling mode (number of retries and whether to skip or stop) depending on how important it is for you to process the data sequentially. 
-> 
-> You can adopt this strategy by inspecting the data carried by the *record* in your implementation of `IRecordProcessor.GetErrorHandlingMode` and returning a different error handling mode depending on the data.
+> Once captured in *SQS* the data can be processed by another background process and potentially retried for up to 14 days (*SQS*'s max retention period) although in practice if the data cannot be processed with so many attempts you probably want to send out an alert and have an engineer look into it!
 
 #### tl;dr
 
