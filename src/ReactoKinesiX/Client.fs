@@ -278,25 +278,28 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
                 // look for workers with at least 2 more shards than the current worker
                 let workersWithMoreLoad = shardsCountByWorker |> Array.filter (fun (_, count) -> count > myShardsCount + 1)
 
-                // whilst trying to ask other workers to hand over their shards, only do so as far as not to give the
-                // current worker more than the 
-                let maxTargetShards = workersWithMoreLoad |> Seq.map snd |> Seq.min
-                let shardsToTake    = min (maxTargetShards - myShardsCount) workersWithMoreLoad.Length
+                match workersWithMoreLoad with
+                | [||] -> () // no one's got more load, so do nothing
+                | workersWithMoreLoad ->
+                    // whilst trying to ask other workers to hand over their shards, only do so as far as not to give the
+                    // current worker more than the current worker
+                    let maxTargetShards = workersWithMoreLoad |> Seq.map snd |> Seq.min
+                    let shardsToTake    = min (maxTargetShards - myShardsCount) workersWithMoreLoad.Length
                 
-                // these are the workers whom we're going to ask to hand over one of their shards
-                let targetWorkers = workersWithMoreLoad 
-                                    |> Seq.sortBy (fun (_, count) -> -count)
-                                    |> Seq.take shardsToTake
-                                    |> Seq.map fst
-                                    |> Seq.toArray
+                    // these are the workers whom we're going to ask to hand over one of their shards
+                    let targetWorkers = workersWithMoreLoad 
+                                        |> Seq.sortBy (fun (_, count) -> -count)
+                                        |> Seq.take shardsToTake
+                                        |> Seq.map fst
+                                        |> Seq.toArray
 
-                logDebug "Attempting to request [{0}] workers to handover one of their shards : [{1}]" 
-                         [| targetWorkers.Length; targetWorkers |> Seq.map (function WorkerId workerId -> workerId) |> csv |]
+                    logDebug "Attempting to request [{0}] workers to handover one of their shards : [{1}]" 
+                             [| targetWorkers.Length; targetWorkers |> Seq.map (function WorkerId workerId -> workerId) |> csv |]
                 
-                targetWorkers 
-                |> Array.iter (fun fromWorkerId -> 
-                    let shard = shardsByWorker.[fromWorkerId] |> Seq.head
-                    Async.Start(issueHandoverRequest fromWorkerId shard.ShardId, cts.Token))
+                    targetWorkers 
+                    |> Array.iter (fun fromWorkerId -> 
+                        let shard = shardsByWorker.[fromWorkerId] |> Seq.head
+                        Async.Start(issueHandoverRequest fromWorkerId shard.ShardId, cts.Token))
             | Failure exn ->
                 logError exn "Failed to retrieve shard statuses from the state table [{0}]" [| tableName |]
         }
