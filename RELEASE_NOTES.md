@@ -31,3 +31,7 @@ Minor:
 - added stubs for dynamodb and kinesis
 - added unit tests
 - updated log4net and AWSSDK dependencies to latest
+
+#### 0.2.1 - Oct 3, 2014
+Bug fix:
+- fixed 'The input sequence was empty.' exception when attempting to share load
