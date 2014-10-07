@@ -35,3 +35,6 @@ Minor:
 #### 0.2.1 - Oct 3, 2014
 Bug fix:
 - fixed 'The input sequence was empty.' exception when attempting to share load
+
+#### 0.3.0 - Oct 7, 2014
+- shard ID is passed to the shard processor
