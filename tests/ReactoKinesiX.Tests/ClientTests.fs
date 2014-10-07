@@ -31,7 +31,7 @@ type ``Given that an application is starting`` () =
                 onNewProcessor ()
 
                 { new IRecordProcessor with
-                    member this.Process records  = 
+                    member this.Process(_shardId, records) = 
                         onProcessed records
                         { Status = Status.Success; Checkpoint = false }
                     member this.OnMaxRetryExceeded (_, _) = ()

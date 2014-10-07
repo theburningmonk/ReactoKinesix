@@ -26,7 +26,7 @@ let main argv =
         printfn "\n\n\n\n\n\n\n\n\n\n%d Records\n%A\n\n\n\n\n\n\n\n\n\n" records.Length mode
 
     let gen () = { new IRecordProcessor with 
-                        member this.Process records = act records
+                        member this.Process (_shardId, records) = act records
                         member this.OnMaxRetryExceeded (records, mode) = maxRetryExceeded records mode
                         member this.Dispose() = printfn "Processor disposed" }
 
