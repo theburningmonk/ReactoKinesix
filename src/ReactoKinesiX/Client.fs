@@ -28,7 +28,7 @@ type IRecordProcessor =
     inherit IDisposable
 
     /// Process a batch of record
-    abstract member Process             : records : Record[] -> ProcessRecordsResult
+    abstract member Process             : shardId : string * records : Record[] -> ProcessRecordsResult
 
     /// This method is called when we have exceeded the number of retries for a record
     abstract member OnMaxRetryExceeded  : records : Record[] * errorHandlingMode : ErrorHandlingMode -> unit
@@ -549,7 +549,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
         let inline tryProcess (records : Record[]) =
             try
-                processor.Process records
+                processor.Process(shardId.ToString(), records)
             with 
             | exn -> { Status = Status.Failure exn; Checkpoint = false }
 

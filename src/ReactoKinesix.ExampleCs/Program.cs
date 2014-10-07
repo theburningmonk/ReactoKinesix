@@ -1,15 +1,15 @@
 ﻿using System;
 using System.Text;
 using Amazon;
-using ReactoKinesix.Model;
 
 using log4net.Config;
+using ReactoKinesix.Model;
 
 namespace ReactoKinesix.ExampleCs
 {
     public class MyProcessor : IRecordProcessor
     {
-        public ProcessRecordsResult Process(Record[] records)
+        public ProcessRecordsResult Process(string shardId, Record[] records)
         {
             foreach (var record in records)
             {
