@@ -1,0 +1,19 @@
+source https://nuget.org/api/v2
+
+nuget AWSSDK
+nuget FSharp.Formatting
+nuget FSharp.Reactive 2.2.131002
+nuget Foq
+nuget FsUnit
+nuget NUnit
+nuget NUnit.Runners
+nuget FAKE
+nuget Rx-Core 2.2.2
+nuget Rx-Interfaces 2.2.2
+nuget Rx-Linq 2.2.2
+nuget Rx-Main 2.2.2
+nuget Rx-PlatformServices 2.2.3
+nuget SourceLink.Fake
+nuget log4net
+
+github fsharp/FAKE modules/Octokit/Octokit.fsx

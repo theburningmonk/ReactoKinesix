@@ -11,7 +11,9 @@ Say more
 
 *)
 #r "ReactoKinesix.dll"
+open ReactoKinesix
 
+Library.hello 0
 (**
 Some more info
 *)
