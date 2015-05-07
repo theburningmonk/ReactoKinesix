@@ -207,11 +207,12 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
             | Failure exn -> logWarn exn "Failed to retrieve information about shards, skipping check for stream changes..." [||]
         }
        
-    let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
-                      .Subscribe(fun _ -> 
-                            initializedEvent.Trigger(this, new EventArgs())
-                            logDebug "State table [{0}] is ready, initializing shard processors..." [| tableName |]
-                            Async.Start(checkStreamChanges, cts.Token))
+    let _ = Observable
+                .FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
+                .Subscribe(fun _ -> 
+                    initializedEvent.Trigger(this, new EventArgs())
+                    logDebug "State table [{0}] is ready, initializing shard processors..." [| tableName |]
+                    Async.StartImmediate(checkStreamChanges, cancellationToken = cts.Token))
 
     let refreshSub = runScheduledTask config.CheckStreamChangesFrequency checkStreamChanges
 

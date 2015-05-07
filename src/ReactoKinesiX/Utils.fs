@@ -241,7 +241,7 @@ module internal CloudWatchUtils =
 
         async {
             logDebug "Pushing [{0}] metrics in [{1}] batches." [| metrics.Length; requests.Length |]
-            // DON'T push metrics in parallel, avoids spikes in CPU/thread/bandwidth usages when this happens
+            // DON'T push metrics in parallel, avoids spikes in CPU/thread/bandwidth usage
             for req in requests do
                 do! pushMetricsInternal cloudWatch req
         }
