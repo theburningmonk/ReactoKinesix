@@ -106,7 +106,7 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
         Observable
             .Interval(freq)
             .Subscribe(fun _ -> 
-                Async.RunSynchronously(wrapped, cancellationToken = cts.Token))
+                Async.StartImmediate(wrapped, cancellationToken = cts.Token))
         
     let updateShardProcessors (shardIds : string seq) (update : ShardId -> Async<unit>) = 
         async {
