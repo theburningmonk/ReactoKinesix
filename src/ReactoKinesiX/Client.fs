@@ -103,7 +103,10 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
     
     let runScheduledTask freq job = 
         let wrapped = job |> Async.Catch |> Async.Ignore
-        Observable.Interval(freq).Subscribe(fun _ -> Async.Start(wrapped, cts.Token))
+        Observable
+            .Interval(freq)
+            .Subscribe(fun _ -> 
+                Async.RunSynchronously(wrapped, cancellationToken = cts.Token))
         
     let updateShardProcessors (shardIds : string seq) (update : ShardId -> Async<unit>) = 
         async {
