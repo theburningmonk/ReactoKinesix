@@ -167,7 +167,13 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
                     knownShards.Remove(shardId) |> ignore
                     reply.Reply()
         }
-    let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn exn "Controller agent was restarted due to exception" [||])
+
+    let onControllerRestart exn = logWarn exn "Controller agent was restarted due to exception" [||]
+    let controller = 
+        Agent<ControlMessage>.StartProtected(
+            body, 
+            cts.Token, 
+            onRestart = onControllerRestart)
 
     let startShardProcessor shardId = controller.PostAndAsyncReply(fun reply -> StartShardProcessor(shardId, reply))
     let stopShardProcessor  shardId = controller.PostAndAsyncReply(fun reply -> StopShardProcessor(shardId, reply))
