@@ -233,15 +233,17 @@ module internal CloudWatchUtils =
 
         let pushMetricsInternal (cloudWatch : IAmazonCloudWatch) req =
             async {
-                let! res = Async.WithRetry(cloudWatch.PutMetricDataAsync(req) |> Async.AwaitTask, 2)
+                let! res = Async.WithRetry(cloudWatch.PutMetricDataAsync(req) |> Async.AwaitTask, 1)
                 match res with
                 | Success _   -> logDebug "Successfully pushed [{0}] metrics." [| req.MetricData.Count |]
-                | Failure exn -> logWarn  exn "Failed to push [{0}] metrics.\n{1}" [| req.MetricData.Count; exn |]
+                | Failure exn -> logWarn exn "Failed to push [{0}] metrics.\n{1}" [| req.MetricData.Count; exn |]
             }
 
         async {
             logDebug "Pushing [{0}] metrics in [{1}] batches." [| metrics.Length; requests.Length |]
-            do! requests |> Seq.map (pushMetricsInternal cloudWatch) |> Async.Parallel |> Async.Ignore
+            // DON'T push metrics in parallel, avoids spikes in CPU/thread/bandwidth usages when this happens
+            for req in requests do
+                do! pushMetricsInternal cloudWatch req
         }
 
 module internal KinesisUtils =
