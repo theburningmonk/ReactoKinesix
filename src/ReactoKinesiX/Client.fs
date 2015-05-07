@@ -659,7 +659,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                              |> Observable.merge (maxRetryExceeded |> Observable.map (fun _ -> ()))
 
     // signal to process the next batch of records that has been received
-    let nextBatch    = initializedEvent.Publish
+    let nextBatch = initializedEvent.Publish
                         .Merge(processingCycleEnd.Select(fun _ -> ()))
                         .TakeUntil(stopProcessing)
 
