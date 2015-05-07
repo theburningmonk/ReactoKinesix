@@ -309,9 +309,10 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
         }
 
     let shareLoadSub = runScheduledTask config.LoadBalanceFrequency shareLoad
-    let proactiveShareLoadSub = shardProcessorCountChangedEvent.Publish
-                                    .Where((=) 0)
-                                    .Subscribe(fun _ -> Async.Start(shareLoad, cts.Token))
+    let proactiveShareLoadSub = 
+        shardProcessorCountChangedEvent.Publish
+            .Where((=) 0)
+            .Subscribe(fun _ -> Async.StartImmediate(shareLoad, cts.Token))
     
     //#endregion
 
