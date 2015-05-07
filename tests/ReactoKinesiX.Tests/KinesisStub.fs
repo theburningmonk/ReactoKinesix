@@ -206,6 +206,26 @@ type KinesisStub () =
 
         //#endregion
 
+        //#region PutRecords
+
+        member this.PutRecords req =
+            let stream = getStream req.StreamName
+            let results = req.Records |> Seq.map (fun entry -> 
+                let req = new PutRecordRequest
+                                (Data = entry.Data, 
+                                 PartitionKey = entry.PartitionKey, 
+                                 ExplicitHashKey = entry.ExplicitHashKey)
+                let shardId, seqNum = stream.PutRecord(req)
+                new PutRecordsResultEntry(ShardId = shardId, SequenceNumber = seqNum))
+            let res = new PutRecordsResponse()
+            res.Records.AddRange(results)
+            res
+
+        member this.PutRecordsAsync (req, _) =
+            async { return (this :> IAmazonKinesis).PutRecords req } |> Async.StartAsTask
+
+        //#endregion
+
         //#region GetShardIterator
 
         member this.GetShardIterator req =

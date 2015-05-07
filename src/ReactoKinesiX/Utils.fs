@@ -177,11 +177,13 @@ module internal Utils =
                                       ?cancellationToken : CancellationToken,
                                       ?onRestart : Exception -> unit) = 
             let onRestart = defaultArg onRestart (fun _ -> ())
-            let watchdog f x = async {
-                while true do
-                    try
-                        do! f x
-                    with exn -> onRestart(exn)
+            let rec watchdog f x = async {
+                let! res = f x |> Async.Catch
+                match res with
+                | Choice1Of2 _ -> return ()
+                | Choice2Of2 exn -> 
+                    onRestart(exn)
+                    return! watchdog f x
             }
 
             Agent.Start((fun inbox -> watchdog body inbox), ?cancellationToken = cancellationToken)
