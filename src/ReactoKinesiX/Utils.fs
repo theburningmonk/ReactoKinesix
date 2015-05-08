@@ -310,12 +310,13 @@ module internal KinesisUtils =
                    (config : ReactoKinesixConfig) 
                    streamName 
                    shardId
-                   iterator = 
+                   iterator
+                   batchSize = 
         async {
             match iterator with
             | EndOfShard -> return Failure(ShardCannotBeIteratedException)
             | _ ->
-                let req = GetRecordsRequest()
+                let req = GetRecordsRequest(Limit = batchSize)
 
                 match iterator with  
                 | IteratorToken(token) -> req.ShardIterator <- token

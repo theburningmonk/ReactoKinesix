@@ -271,7 +271,7 @@ type KinesisUtilsTests () =
     member test.``getRecords should return failure when iterator is at end of shard`` () =
         let kinesis = Mock<IAmazonKinesis>().Create()
         let config  = new ReactoKinesixConfig()
-        let res     = KinesisUtils.getRecords kinesis config (StreamName "stream") (ShardId "shard-1") EndOfShard
+        let res     = KinesisUtils.getRecords kinesis config (StreamName "stream") (ShardId "shard-1") EndOfShard 100
                       |> Async.RunSynchronously
 
         match res with | Failure(ShardCannotBeIteratedException) -> true
@@ -296,7 +296,7 @@ type KinesisUtilsTests () =
                 .Returns(Task.FromResult(response))
                 .Create()
 
-        let res = KinesisUtils.getRecords kinesis config (StreamName "stream") (ShardId "shard-1") (IteratorToken "iterator")
+        let res = KinesisUtils.getRecords kinesis config (StreamName "stream") (ShardId "shard-1") (IteratorToken "iterator") 100
                   |> Async.RunSynchronously
 
         match res with | Success _ -> true
@@ -326,7 +326,7 @@ type KinesisUtilsTests () =
                 .Returns(Task.FromResult(getRecordsRes))
                 .Create()
 
-        let res = KinesisUtils.getRecords kinesis config (StreamName "stream") (ShardId "shard-1") (NoIteratorToken Latest)
+        let res = KinesisUtils.getRecords kinesis config (StreamName "stream") (ShardId "shard-1") (NoIteratorToken Latest) 100
                   |> Async.RunSynchronously
 
         match res with | Success _ -> true

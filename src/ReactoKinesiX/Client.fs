@@ -535,7 +535,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
             | _ -> 
                 logDebug "Fetching next records with iterator [{0}]" [| iterator |]
 
-                let! getRecordsResult = KinesisUtils.getRecords app.Kinesis app.Config app.StreamName shardId iterator
+                let! getRecordsResult = KinesisUtils.getRecords app.Kinesis app.Config app.StreamName shardId iterator app.Config.MaxBatchSize
                 match getRecordsResult with
                 | Success(nextIterator, batch) when nextIterator = null -> 
                     logDebug "Received batch of [{0}] records, no more records will be available (end of shard)" [| batch.Length |]
@@ -658,8 +658,10 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                              |> Observable.merge noCheckpoint
                              |> Observable.merge (maxRetryExceeded |> Observable.map (fun _ -> ()))
 
+    let initialized = initializedEvent.Publish
+
     // signal to process the next batch of records that has been received
-    let nextBatch = initializedEvent.Publish
+    let nextBatch = initialized
                         .Merge(processingCycleEnd.Select(fun _ -> ()))
                         .TakeUntil(stopProcessing)
 
@@ -676,11 +678,13 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     // start fetching for the next batch of records straight after the last batch was received, with a minor delay if the last
     // batch was empty to reduce the number of calls to Kinesis during periods of inactivity
-    let fetchNext        = Observable.Delay(emptyReceived, app.Config.EmptyReceiveDelay)
-                           |> Observable.merge nonEmptyReceived
-    let fetchNextSub     = fetchNext
-                            .TakeUntil(stopFetching)
-                            .Subscribe(fun (iterator, _) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
+    let fetchNext    = Observable
+                        .Delay(emptyReceived, app.Config.EmptyReceiveDelay)
+                        .Merge nonEmptyReceived
+    let fetchNextSub = fetchNext
+                        .Zip(processed, fun iterator _ -> iterator)
+                        .TakeUntil(stopFetching)
+                        .Subscribe(fun (iterator, _) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
 
     // after we have received the next batch of records, wait for the nextBatch signal.
     // this could include a forced period of delay if the last batch was empty even if this batch is not empty, this is so that
@@ -721,7 +725,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
     let handoverCheckSub = 
         Observable
             .Interval(app.Config.CheckPendingHandoverRequestFrequency)
-            .SkipUntil(initializedEvent.Publish)
+            .SkipUntil(initialized)
             .TakeUntil(stopProcessing)
             .Subscribe(fun _ -> Async.Start(checkPendingHandoverRequest, cts.Token))
                 
@@ -799,7 +803,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     // keep retrying failed initializations until it succeeds
     let retryInitSub = initializationFailedEvent.Publish
-                        .TakeUntil(initializedEvent.Publish)
+                        .TakeUntil(initialized)
                         .Subscribe(fun _ -> Async.Start(init, cts.Token))
 
     do Async.Start(init, cts.Token)
