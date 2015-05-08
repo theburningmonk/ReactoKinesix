@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>example-csharp</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="description" content="A Rx-based .Net client library for Amazon Kinesis"/>
+    <meta name="author" content="Yan Cui"/>
+
+    <script src="https://code.jquery.com/jquery-1.8.0.js"></script>
+    <script src="https://code.jquery.com/ui/1.8.23/jquery-ui.js"></script>
+    <script src="https://netdna.bootstrapcdn.com/twitter-bootstrap/2.2.1/js/bootstrap.min.js"></script>
+    <link href="https://netdna.bootstrapcdn.com/twitter-bootstrap/2.2.1/css/bootstrap-combined.min.css" rel="stylesheet"/>
+
+    <link type="text/css" rel="stylesheet" href="/ReactoKinesix/content/style.css" />
+    <script type="text/javascript" src="/ReactoKinesix/content/tips.js"></script>
+    <!-- HTML5 shim, for IE6-8 support of HTML5 elements -->
+    <!--[if lt IE 9]>
+      <script src="https://html5shim.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+  </head>
+  <body>
+    <div class="container">
+      <div class="masthead">
+        <ul class="nav nav-pills pull-right">
+          <li><a href="http://fsharp.org">fsharp.org</a></li>
+          <li><a href="http://github.com/theburningmonk/ReactoKinesix">github page</a></li>
+        </ul>
+        <h3 class="muted"><a href="/ReactoKinesix/index.html">ReactoKinesix</a></h3>
+      </div>
+      <hr />
+      <div class="row">
+        <div class="span9" id="main">
+          
+<p>Start by downloading the <a href="https://www.nuget.org/packages/ReactoKinesix/">Nuget package</a>.</p>
+
+<table class="pre"><tr><td class="lines"><span class="l"> 1: </span>
+<span class="l"> 2: </span>
+<span class="l"> 3: </span>
+<span class="l"> 4: </span>
+<span class="l"> 5: </span>
+<span class="l"> 6: </span>
+<span class="l"> 7: </span>
+<span class="l"> 8: </span>
+<span class="l"> 9: </span>
+<span class="l">10: </span>
+<span class="l">11: </span>
+<span class="l">12: </span>
+<span class="l">13: </span>
+<span class="l">14: </span>
+<span class="l">15: </span>
+<span class="l">16: </span>
+<span class="l">17: </span>
+<span class="l">18: </span>
+<span class="l">19: </span>
+<span class="l">20: </span>
+<span class="l">21: </span>
+<span class="l">22: </span>
+<span class="l">23: </span>
+<span class="l">24: </span>
+<span class="l">25: </span>
+<span class="l">26: </span>
+<span class="l">27: </span>
+<span class="l">28: </span>
+<span class="l">29: </span>
+</td>
+<td class="snippet"><pre lang="csharp"><span class="k">class</span> Program
+{
+    <span class="k">static</span> <span class="k">void</span> Main()
+    {
+        <span class="k">var</span> awsKey <span class="o">=</span> <span class="s">"AKIAJTGWYUCX6G7P2FOQ"</span>;
+        <span class="k">var</span> awsSecret <span class="o">=</span> <span class="s">"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"</span>;
+        <span class="k">var</span> region <span class="o">=</span> RegionEndpoint.USEast1;
+        <span class="k">var</span> appName <span class="o">=</span> <span class="s">"YC-test"</span>;
+        <span class="k">var</span> streamName <span class="o">=</span> <span class="s">"YC-test"</span>;
+        <span class="k">var</span> workerId <span class="o">=</span> <span class="s">"PHANTOM-cs"</span>;
+
+        Console.WriteLine(<span class="s">"Starting client application..."</span>);
+
+        <span class="k">var</span> factory <span class="o">=</span> <span class="k">new</span> MyProcessorFactory();
+        <span class="k">var</span> app <span class="o">=</span> 
+            ReactoKinesixApp.CreateNew(
+                awsKey, awsSecret, region, appName, streamName, workerId, factory);
+
+        app.OnInitialized <span class="o">+</span><span class="o">=</span> (_, evtArgs) <span class="o">=</span><span class="o">&gt;</span> 
+            Console.WriteLine(<span class="s">"Client application started"</span>);
+        app.OnBatchProcessed <span class="o">+</span><span class="o">=</span> (_, evtArgs) <span class="o">=</span><span class="o">&gt;</span> 
+            Console.WriteLine(<span class="s">"Another batch processed..."</span>);
+
+        Console.WriteLine(<span class="s">"Press any key to quit..."</span>);
+        Console.ReadKey();
+
+        app.Dispose();
+    }
+}
+</pre></td></tr></table>
+
+<p>The above example assumes existence of <code>MyProcessorFactory</code>.</p>
+
+<table class="pre"><tr><td class="lines"><span class="l"> 1: </span>
+<span class="l"> 2: </span>
+<span class="l"> 3: </span>
+<span class="l"> 4: </span>
+<span class="l"> 5: </span>
+<span class="l"> 6: </span>
+<span class="l"> 7: </span>
+<span class="l"> 8: </span>
+<span class="l"> 9: </span>
+<span class="l">10: </span>
+<span class="l">11: </span>
+<span class="l">12: </span>
+<span class="l">13: </span>
+<span class="l">14: </span>
+<span class="l">15: </span>
+<span class="l">16: </span>
+<span class="l">17: </span>
+<span class="l">18: </span>
+<span class="l">19: </span>
+<span class="l">20: </span>
+<span class="l">21: </span>
+<span class="l">22: </span>
+<span class="l">23: </span>
+<span class="l">24: </span>
+<span class="l">25: </span>
+<span class="l">26: </span>
+<span class="l">27: </span>
+<span class="l">28: </span>
+<span class="l">29: </span>
+<span class="l">30: </span>
+<span class="l">31: </span>
+<span class="l">32: </span>
+<span class="l">33: </span>
+<span class="l">34: </span>
+<span class="l">35: </span>
+<span class="l">36: </span>
+<span class="l">37: </span>
+<span class="l">38: </span>
+<span class="l">39: </span>
+<span class="l">40: </span>
+<span class="l">41: </span>
+<span class="l">42: </span>
+<span class="l">43: </span>
+</td>
+<td class="snippet"><pre lang="csharp">open ReactoKinesix
+open ReactoKinesix.Model
+
+<span class="k">public</span> <span class="k">class</span> MyProcessorFactory <span class="o">:</span> IRecordProcessorFactory
+{
+    <span class="k">public</span> IRecordProcessor CreateNew(<span class="k">string</span> shardId)
+    {
+        <span class="k">return</span> <span class="k">new</span> MyProcessor();
+    }
+}
+
+<span class="k">public</span> <span class="k">class</span> MyProcessor <span class="o">:</span> IRecordProcessor
+{
+    <span class="k">public</span> ProcessRecordsResult Process(
+        <span class="k">string</span> shardId, 
+        Record[] records)
+    {
+        <span class="k">foreach</span> (<span class="k">var</span> record <span class="k">in</span> records)
+        {
+            <span class="k">var</span> msg <span class="o">=</span> System.Text.Encoding.UTF8.GetString(record.Data);
+            Console.WriteLine(
+                <span class="s">"You got message [{0}] : {1}"</span>, 
+                record.SequenceNumber, 
+                msg);
+        }
+
+        <span class="k">return</span> <span class="k">new</span> ProcessRecordsResult(Status.Success, <span class="k">true</span>);
+    }
+
+    <span class="k">public</span> <span class="k">void</span> OnMaxRetryExceeded(
+        Record[] records, 
+        ErrorHandlingMode errorHandlingMode)
+    {
+        Console.WriteLine(
+            <span class="s">"Batch [count:{0}] failed."</span>, 
+            records.Length);
+    }
+
+    <span class="k">public</span> <span class="k">void</span> Dispose()
+    {
+        Console.WriteLine(<span class="s">"Processor disposed"</span>);
+    }
+}
+</pre></td></tr></table>
+
+
+        </div>
+        <div class="span3">
+          <img src="/ReactoKinesix/img/logo.png" alt="F# Project" style="width:150px;margin:10px" />  
+          <ul class="nav nav-list" id="menu" style="margin-top: 20px;">
+            <li class="nav-header">ReactoKinesix</li>
+            <li><a href="/ReactoKinesix/index.html">Home page</a></li>
+            <li class="divider"></li>
+            <li><a href="http://nuget.org/packages/ReactoKinesix">Get Library via NuGet</a></li>
+            <li><a href="http://github.com/theburningmonk/ReactoKinesix">Source Code on GitHub</a></li>
+            <li><a href="/ReactoKinesix/license.html">License</a></li>
+            <li><a href="/ReactoKinesix/release-notes.html">Release Notes</a></li>
+
+            <li class="nav-header">Tutorials</li>
+            <li><a href="/ReactoKinesix/example-csharp.html">C# example</a></li>
+              <li><a href="/ReactoKinesix/example-fsharp.html">F# example</a></li>
+
+            <li class="nav-header">Documentation</li>
+            <li><a href="/ReactoKinesix/getting-started.html">Getting Started</a></li>              
+            <li><a href="/ReactoKinesix/features.html">Features</a></li>              
+            <li><a href="/ReactoKinesix/error-handling.html">Error Handling</a></li>              
+            <li><a href="/ReactoKinesix/distributed-processing.html">Distributed Processing</a></li>              
+            <li><a href="/ReactoKinesix/reference/index.html">API Reference</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <a href="http://github.com/theburningmonk/ReactoKinesix"><img style="position: absolute; top: 0; right: 0; border: 0;" src="https://s3.amazonaws.com/github/ribbons/forkme_right_gray_6d6d6d.png" alt="Fork me on GitHub"/></a>
+  </body>
+  </html>

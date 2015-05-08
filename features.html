@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>features</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="description" content="A Rx-based .Net client library for Amazon Kinesis"/>
+    <meta name="author" content="Yan Cui"/>
+
+    <script src="https://code.jquery.com/jquery-1.8.0.js"></script>
+    <script src="https://code.jquery.com/ui/1.8.23/jquery-ui.js"></script>
+    <script src="https://netdna.bootstrapcdn.com/twitter-bootstrap/2.2.1/js/bootstrap.min.js"></script>
+    <link href="https://netdna.bootstrapcdn.com/twitter-bootstrap/2.2.1/css/bootstrap-combined.min.css" rel="stylesheet"/>
+
+    <link type="text/css" rel="stylesheet" href="/ReactoKinesix/content/style.css" />
+    <script type="text/javascript" src="/ReactoKinesix/content/tips.js"></script>
+    <!-- HTML5 shim, for IE6-8 support of HTML5 elements -->
+    <!--[if lt IE 9]>
+      <script src="https://html5shim.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+  </head>
+  <body>
+    <div class="container">
+      <div class="masthead">
+        <ul class="nav nav-pills pull-right">
+          <li><a href="http://fsharp.org">fsharp.org</a></li>
+          <li><a href="http://github.com/theburningmonk/ReactoKinesix">github page</a></li>
+        </ul>
+        <h3 class="muted"><a href="/ReactoKinesix/index.html">ReactoKinesix</a></h3>
+      </div>
+      <hr />
+      <div class="row">
+        <div class="span9" id="main">
+          
+<h3><a name="Stopping-and-Starting-processing-of-a-shard" class="anchor" href="#Stopping-and-Starting-processing-of-a-shard">Stopping and Starting processing of a shard</a></h3>
+
+<p>If for some reason you need to stop processing a <em>shard</em>, and restart it later, you can call the <code>IReactoKinesixApp.StopProcessing</code> and <code>IReactoKinesixApp.StartProcessing</code> methods with a <em>shard ID</em>.</p>
+
+<blockquote>
+  <p><strong>Note</strong>: when stopping processing of a <em>shard</em>, in order to avoid lost of progress and potentially process the same <em>records</em> more than once when processing is resumed, processing of the <em>shard</em> will come to a stop only after we have managed to finish processing the current batch of <em>records</em> that have been received and that the checkpoint has been updated successfully in <em>Amazon DynamoDB</em>.<br />
+<strong>Note</strong>: if you are running the client application on multiple nodes then you'll need to call the stop/start processing method on all the nodes otherwise another node will simply take over processing of the <em>shard</em> when the heartbeat time out has lapsed.</p>
+</blockquote>
+
+<h3><a name="Changing-processor-on-the-fly" class="anchor" href="#Changing-processor-on-the-fly">Changing processor on the fly</a></h3>
+
+<p>You can also change the <code>IRecordProcessorFactory</code> implementation used by the client application at runtime, by calling the <code>IReactoKinesixApp.ChangeProcessorFactory</code> method.</p>
+
+<blockquote>
+  <p><strong>Note</strong>: if you are running the client application on multiple nodes then you'll need to call the <code>IReactoKinesixApp.ChangeProcessorFactory</code> method on all the nodes.</p>
+</blockquote>
+
+<h3><a name="Stopping-the-client-application" class="anchor" href="#Stopping-the-client-application">Stopping the client application</a></h3>
+
+<p>To completely stop the client application and release all the resources currently used, simply <strong>dispose</strong> of the running <code>IReactoKinesixApp</code> instance. Doing so will stop the processing of all the shards whilst still making sure that the application is kept in a consistent state so that we are able to resume later from where we left off without risk processing the same <em>records</em> again.</p>
+
+<h3><a name="Handling-shard-merge-split" class="anchor" href="#Handling-shard-merge-split">Handling shard merge/split</a></h3>
+
+<p>When you <a href="http://docs.aws.amazon.com/kinesis/latest/APIReference/API_MergeShards.html">merge</a> or <a href="http://docs.aws.amazon.com/kinesis/latest/APIReference/API_SplitShard.html">split</a> <em>shards</em> in <em>Amazon Kinesis</em>, it will create new <em>shard(s)</em> and the old <em>shards</em> will be closed (but still available to pull records from for 1 day). When this happens the client application will see the new <em>shards</em> and start processing them as soon as they become available, and the old <em>shards</em> will be processed until all their records have been processed. <strong>This is handled automatically</strong> by this library.</p>
+
+<h3><a name="Configuring-the-client-application" class="anchor" href="#Configuring-the-client-application">Configuring the client application</a></h3>
+
+<p>Whilst you don't need to specify a configuration when creating a new client application using the <code>ReactoKinesixApp.CreateNew</code> static method, a <strong>default configuration is used</strong> with the following settings:</p>
+
+<table>
+    <thead>
+        <tr>
+            <td><strong>Configuration</strong></td>
+            <td><strong>Default Value</strong></td>
+            <td><strong>Description</strong></td>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>DynamoDBReadThroughput</td>
+            <td>10</td>
+            <td>Read throughput to use for the DynamoDB table.</td>
+        </tr>
+        <tr>
+            <td>DynamoDBWriteThroughput</td>
+            <td>10</td>
+            <td>Write throughput to use for the DynamoDB table.</td>
+        </tr>
+        <tr>
+            <td>DynamoDBTableSuffix</td>
+            <td>KinesisState</td>
+            <td>Suffix used to name your application's state table in DynamoDB.</td>
+        </tr>
+        <tr>
+            <td>Heartbeat</td>
+            <td>30 seconds</td>
+            <td>Heartheat frequency.</td>
+        </tr>
+        <tr>
+            <td>HeartbeatTimeout</td>
+            <td>3 minutes</td>
+            <td>Timeout for the heartbeat check.</td>
+        </tr>
+        <tr>
+            <td>EmptyReceiveDelay</td>
+            <td>3 seconds</td>
+            <td>Delay in trying to pull the stream if the last pull returned no records.</td>
+        </tr>
+        <tr>
+            <td>MaxDynamoDBRetries</td>
+            <td>3</td>
+            <td>Maximum number of retries on DynamoDB operations.</td>
+        </tr>
+        <tr>
+            <td>MaxKinesisRetries</td>
+            <td>3</td>
+            <td>Maximum number of retries on Kinesis operations.</td>
+        </tr>
+        <tr>
+            <td>CheckStreamChangesFrequency</td>
+            <td>1 minute</td>
+            <td>How frequently should we check for shard merges/splits in the stream.</td>
+        </tr>
+        <tr>
+            <td>CheckUnprocessedShardsFrequency</td>
+            <td>1 minute</td>
+            <td>How frequently should we check for shards whose worker has died.</td>
+        </tr>
+        <tr>
+            <td>LoadBalanceFrequency</td>
+            <td>3 minutes</td>
+            <td>How frequently should we try to balance the load amongst the workers.</td>
+        </tr>
+        <tr>
+            <td>HandoverRequestExpiry</td>
+            <td>10 minutes</td>
+            <td>How much time to allow a handover request to complete.</td>
+        </tr>
+        <tr>
+            <td>CheckPendingHandoverRequestFrequency</td>
+            <td>1 minute</td>
+            <td>How frequently should we check for pending handover requests for a shard.</td>
+        </tr>
+        <tr>
+            <td>ErrorHandlingMode</td>
+            <td>Retry twice and then skip</td>
+            <td>How to handle errors.</td>
+        </tr>
+        <tr>
+            <td>MaxBatchSize</td>
+            <td>10,000</td>
+            <td>Max number of records per batch.</td>
+        </tr>
+    </tbody>
+
+<h2><a name="table" class="anchor" href="#table"></table></a></h2>
+
+<p>If you need to use a different configuration to the default, then simply create an instance of <code>ReactoKinesixConfig</code> with the configurations you want and pass it into the <code>ReactoKinesixApp.CreateNew</code> when creating your client application.</p>
+
+<blockquote>
+  <p><strong>Important</strong>: if you know that your application will use a <strong>large number</strong> of <em>shards</em> and worker nodes then you will want to <strong>increase the read and write throughput</strong> for the <em>DynamoDB</em> table otherwise database operations are likely to be throttled on a regular basis and <strong>cause delays in processing your records</strong>.</p>
+</blockquote>
+
+
+        </div>
+        <div class="span3">
+          <img src="/ReactoKinesix/img/logo.png" alt="F# Project" style="width:150px;margin:10px" />  
+          <ul class="nav nav-list" id="menu" style="margin-top: 20px;">
+            <li class="nav-header">ReactoKinesix</li>
+            <li><a href="/ReactoKinesix/index.html">Home page</a></li>
+            <li class="divider"></li>
+            <li><a href="http://nuget.org/packages/ReactoKinesix">Get Library via NuGet</a></li>
+            <li><a href="http://github.com/theburningmonk/ReactoKinesix">Source Code on GitHub</a></li>
+            <li><a href="/ReactoKinesix/license.html">License</a></li>
+            <li><a href="/ReactoKinesix/release-notes.html">Release Notes</a></li>
+
+            <li class="nav-header">Tutorials</li>
+            <li><a href="/ReactoKinesix/example-csharp.html">C# example</a></li>
+              <li><a href="/ReactoKinesix/example-fsharp.html">F# example</a></li>
+
+            <li class="nav-header">Documentation</li>
+            <li><a href="/ReactoKinesix/getting-started.html">Getting Started</a></li>              
+            <li><a href="/ReactoKinesix/features.html">Features</a></li>              
+            <li><a href="/ReactoKinesix/error-handling.html">Error Handling</a></li>              
+            <li><a href="/ReactoKinesix/distributed-processing.html">Distributed Processing</a></li>              
+            <li><a href="/ReactoKinesix/reference/index.html">API Reference</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <a href="http://github.com/theburningmonk/ReactoKinesix"><img style="position: absolute; top: 0; right: 0; border: 0;" src="https://s3.amazonaws.com/github/ribbons/forkme_right_gray_6d6d6d.png" alt="Fork me on GitHub"/></a>
+  </body>
+  </html>

@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>error-handling</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="description" content="A Rx-based .Net client library for Amazon Kinesis"/>
+    <meta name="author" content="Yan Cui"/>
+
+    <script src="https://code.jquery.com/jquery-1.8.0.js"></script>
+    <script src="https://code.jquery.com/ui/1.8.23/jquery-ui.js"></script>
+    <script src="https://netdna.bootstrapcdn.com/twitter-bootstrap/2.2.1/js/bootstrap.min.js"></script>
+    <link href="https://netdna.bootstrapcdn.com/twitter-bootstrap/2.2.1/css/bootstrap-combined.min.css" rel="stylesheet"/>
+
+    <link type="text/css" rel="stylesheet" href="/ReactoKinesix/content/style.css" />
+    <script type="text/javascript" src="/ReactoKinesix/content/tips.js"></script>
+    <!-- HTML5 shim, for IE6-8 support of HTML5 elements -->
+    <!--[if lt IE 9]>
+      <script src="https://html5shim.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+  </head>
+  <body>
+    <div class="container">
+      <div class="masthead">
+        <ul class="nav nav-pills pull-right">
+          <li><a href="http://fsharp.org">fsharp.org</a></li>
+          <li><a href="http://github.com/theburningmonk/ReactoKinesix">github page</a></li>
+        </ul>
+        <h3 class="muted"><a href="/ReactoKinesix/index.html">ReactoKinesix</a></h3>
+      </div>
+      <hr />
+      <div class="row">
+        <div class="span9" id="main">
+          
+<p>As mentioned in the <a href="getting-started.html"><strong>Getting Started</strong></a> section of this guide, the <code>IRecordProcessor</code> interface requires you to implement these methods:
+- <code>Process</code>
+- <code>OnMaxRetryExceeded</code></p>
+
+<p>Via the configuration, you can choose to retry on error a number of times and then either 
+- skip the record
+- stop processing this shard altogether</p>
+
+<p>if the specified retries have been reached and the error still persists then the library will proceed to call the <code>IRecordProcessor.OnMaxRetryExceeded</code> method to give you a last chance to handle the <em>record</em> before we skip to the next <em>record</em> or stop processing the <em>shard</em>.</p>
+
+<blockquote>
+  <p><strong>Note</strong>: if you specify a retry count of 0 then the <em>records</em> will not be retried before skipping/stopping.
+<strong>Note</strong>: you may want to ensure that the data carried by the failing <em>records</em> are not lost by implementing a mechanism to fall back to <em>Amazon SQS</em> in your implementation of <code>IRecordProcessor.OnMaxRetryExceeded</code>. This way you can continue processing the shard without losing data.</p>
+
+  <p>Once captured in <em>SQS</em> the data can be processed by another background process and potentially retried for up to 14 days (<em>SQS</em>'s max retention period) although in practice if the data cannot be processed with so many attempts you probably want to send out an alert and have an engineer look into it!</p>
+</blockquote>
+
+<h4><a name="tl-dr" class="anchor" href="#tl-dr">tl;dr</a></h4>
+
+<p><img src="http://reacto-kinesix.s3.amazonaws.com/ErrorFlowChart.png" alt="Error Flow Chart" /></p>
+
+<h4><a name="When-to-use-RetryAndStop" class="anchor" href="#When-to-use-RetryAndStop">When to use <em>RetryAndStop</em>?</a></h4>
+
+<blockquote>
+  <p><em>Amazon Kinesis</em> uses the <em>partition key</em> (which you supply when you push the <em>record</em> to <em>Kinesis</em>) to calculate a hash which determines which <em>shard</em> a <em>record</em> will go into.</p>
+</blockquote>
+
+<p>When it's absolutely paramount for you to preserve the order in which <em>records</em> for a particular <em>partition key</em> is processed. For example, all analytic events for a player in a social game will have the same <em>partition key</em> and will therefore end up in the same <em>shard</em> and if these events must be processed sequentially then you will want to use the <em>RetryAndStop</em> error handing mode to ensure that persistent/temporary errors do not cause the events to be processed out-of-order.</p>
+
+<blockquote>
+  <p><strong>Note</strong>: if processing of a <em>shard</em> is stopped due to the use of the <strong>RetryAndStop</strong> handling mode then the client application will not try to process this <em>shard</em> again unless explicitly told to do with when you call the <code>IReactoKinesixApp.StartProcessing</code> method.</p>
+
+  <p>However, other workers/nodes will still take over processing of this <em>shard</em>, but if the problem that is causing the <em>record</em> to fail is not local to the earlier node, then each and every node that attempts to process the <em>shard</em> will also fail and eventually they will all stop trying to process this particular <em>shard</em>.
+<strong>Important</strong>: <strong>loss of data is possible</strong> if processing of a <em>shard</em> is stopped for a prolonged period and unprocessed <em>records</em> become unavailable as <em>Amazon Kinesis</em> only retains up to 24 hours worth of data.</p>
+</blockquote>
+
+<h4><a name="When-to-use-RetryAndSkip" class="anchor" href="#When-to-use-RetryAndSkip">When to use <em>RetryAndSkip</em>?</a></h4>
+
+<p>In most cases! In order to prevent the build-up of backlogs or in extreme cases the loss of data you should avoid stopping processing of a <em>shard</em> in the event of errors except in exceptional circumstances, and instead rely on other mechanisms (such as the use of <code>Amazon SNS</code> and <code>Amazon SQS</code> as described earlier) to deal with persistent errors.</p>
+
+
+        </div>
+        <div class="span3">
+          <img src="/ReactoKinesix/img/logo.png" alt="F# Project" style="width:150px;margin:10px" />  
+          <ul class="nav nav-list" id="menu" style="margin-top: 20px;">
+            <li class="nav-header">ReactoKinesix</li>
+            <li><a href="/ReactoKinesix/index.html">Home page</a></li>
+            <li class="divider"></li>
+            <li><a href="http://nuget.org/packages/ReactoKinesix">Get Library via NuGet</a></li>
+            <li><a href="http://github.com/theburningmonk/ReactoKinesix">Source Code on GitHub</a></li>
+            <li><a href="/ReactoKinesix/license.html">License</a></li>
+            <li><a href="/ReactoKinesix/release-notes.html">Release Notes</a></li>
+
+            <li class="nav-header">Tutorials</li>
+            <li><a href="/ReactoKinesix/example-csharp.html">C# example</a></li>
+              <li><a href="/ReactoKinesix/example-fsharp.html">F# example</a></li>
+
+            <li class="nav-header">Documentation</li>
+            <li><a href="/ReactoKinesix/getting-started.html">Getting Started</a></li>              
+            <li><a href="/ReactoKinesix/features.html">Features</a></li>              
+            <li><a href="/ReactoKinesix/error-handling.html">Error Handling</a></li>              
+            <li><a href="/ReactoKinesix/distributed-processing.html">Distributed Processing</a></li>              
+            <li><a href="/ReactoKinesix/reference/index.html">API Reference</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <a href="http://github.com/theburningmonk/ReactoKinesix"><img style="position: absolute; top: 0; right: 0; border: 0;" src="https://s3.amazonaws.com/github/ribbons/forkme_right_gray_6d6d6d.png" alt="Fork me on GitHub"/></a>
+  </body>
+  </html>

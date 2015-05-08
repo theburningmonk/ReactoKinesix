@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>distributed-processing</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="description" content="A Rx-based .Net client library for Amazon Kinesis"/>
+    <meta name="author" content="Yan Cui"/>
+
+    <script src="https://code.jquery.com/jquery-1.8.0.js"></script>
+    <script src="https://code.jquery.com/ui/1.8.23/jquery-ui.js"></script>
+    <script src="https://netdna.bootstrapcdn.com/twitter-bootstrap/2.2.1/js/bootstrap.min.js"></script>
+    <link href="https://netdna.bootstrapcdn.com/twitter-bootstrap/2.2.1/css/bootstrap-combined.min.css" rel="stylesheet"/>
+
+    <link type="text/css" rel="stylesheet" href="/ReactoKinesix/content/style.css" />
+    <script type="text/javascript" src="/ReactoKinesix/content/tips.js"></script>
+    <!-- HTML5 shim, for IE6-8 support of HTML5 elements -->
+    <!--[if lt IE 9]>
+      <script src="https://html5shim.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+  </head>
+  <body>
+    <div class="container">
+      <div class="masthead">
+        <ul class="nav nav-pills pull-right">
+          <li><a href="http://fsharp.org">fsharp.org</a></li>
+          <li><a href="http://github.com/theburningmonk/ReactoKinesix">github page</a></li>
+        </ul>
+        <h3 class="muted"><a href="/ReactoKinesix/index.html">ReactoKinesix</a></h3>
+      </div>
+      <hr />
+      <div class="row">
+        <div class="span9" id="main">
+          
+<p>As you scale up a <em>stream</em> by adding more <em>shards</em> to it, you will need to increase your processing capabilities too, and within <em>Amazon EC2</em> you will be able to do that by setting up <em>Auto Scaling Groups</em> to scale up your cluster of <em>EC2</em> instances based on CPU or Network in/out depending on whether your instances become CPU or network bound when under load.</p>
+
+<p>Alternatively, you can also <strong>scale up</strong> your deployment by using bigger, more powerful <em>EC2</em> instance types, though generally speaking you'll eventually need to scale out at some point as your application grows and requires more and more throughput, so it's advantageous to take the distributed aspect of your <em>Kinesis</em>-consuming application into consideration at the earliest opportunity.</p>
+
+<blockquote>
+  <p><strong>Important</strong>: as of now, scaling down nodes running the client application will require graceful handling (i.e. you need to <strong>dispose</strong> of the running <code>IReactoKinesixApp</code> instance and wait for its <code>Dispose</code> method to complete) to ensure you don't lose any progress when processing a batch of <em>records</em> and that when another node takes over processing of the <em>shards</em> it wouldn't end up processing some of the same <em>records</em> again.</p>
+</blockquote>
+
+<h4><a name="Distributing-the-processing-of-shards" class="anchor" href="#Distributing-the-processing-of-shards">Distributing the processing of shards</a></h4>
+
+<p>This library distributes and balances the load across a cluster of workers via a simple mechanism whereby workers who are processing fewer number of <em>shards</em> will request workers who are processing <strong>at least 2 more</strong> <em>shards</em> to hand over one of the <em>shards</em> they're currently processing.</p>
+
+<p>Since the workers form a <strong>master-less</strong> network, this process happens independently on each of the workers when:
+- the worker has become idle, i.e. not processing any <em>shards</em>
+- the configured <strong>LoadBalanceFrequency</strong> has passed (see <a href="features.html#Configuring-the-client-application">Configuring client application</a>)</p>
+
+<p>To keep the decision making process simple, only one worker should be making handover requests at a time and only when all the <em>shards</em> are actively being processed, though this limitation might be removed in future versions.</p>
+
+<p>Using this approach, when multiple workers are started up at the same time it'll take several iterations to achieve a balanced distribution of load across the workers. Let's illustrate how this process works by walking through two examples:</p>
+
+<p><strong>Example 1 - a new worker joins a cluster of two workers</strong></p>
+
+<p><img src="http://reacto-kinesix.s3.amazonaws.com/HandoverRequestFlowChart-1.png" alt="Example 1" /></p>
+
+<p>As you can see, in this simple case it took two iterations to balance the cluster. In the second iteration <em>Worker 3</em> issued a handover request only to <em>Worker 1</em> because only workers who are processing at least 2 more shards is issued a request.</p>
+
+<p><strong>Example 2 - two new workers join a cluster of two workers</strong></p>
+
+<p><img src="http://reacto-kinesix.s3.amazonaws.com/HandoverRequestFlowChart-2.png" alt="Example 2" /></p>
+
+<p>In this example depending on the timing of events, there are a number of ways in which things can play out but in the end you should have a cluster of 4 workers with one processing 3 shards and the rest 2 shards each.</p>
+
+<p>In a parallel universe with a different turn of events, things might have turned out slightly differently:</p>
+
+<p><img src="http://reacto-kinesix.s3.amazonaws.com/HandoverRequestFlowChart-2-ver2.png" alt="Example 2-Alt" /></p>
+
+<p>As you can see, it took the same number of iterations to achieve essentially the same result!</p>
+
+<blockquote>
+  <p><strong>Remarks</strong>: whilst it might have been easier to implement the distribution of <em>shards</em> using a topology with a master node (ala <a href="http://zookeeper.apache.org/">Zookeeper</a>), or a distributed consensus algorithm such as <a href="http://raftconsensus.github.io/">Raft</a> or <a href="http://en.wikipedia.org/wiki/Paxos_(computer_science)">Paxos</a>, both require making assumptions about connectivity between workers which I did not think is justified at the library level.</p>
+
+  <p>For instance, it's reasonable to assume a configuration whereby workers are distributed across on-premise and cloud-hosted resources where both can access <em>Amazon</em>'s services but connectivity between the clusters is not guaranteed (you might not want to open up public access to your <em>EC2</em> instances).</p>
+</blockquote>
+
+<h4><a name="Recovering-from-loss-of-workers" class="anchor" href="#Recovering-from-loss-of-workers">Recovering from loss of workers</a></h4>
+
+<p>Each of the workers routinely (based on the configured <strong>CheckUnprocessedShardsFrequency</strong>, see <a href="features.html#Configuring-the-client-application">Configuring client application</a>) checks to see if there are any <em>shards</em> that are not being processed based on the timestamp of the last heartbeat and the first worker that successfully updates the <em>DynamoDB</em> entry for the <em>shard</em> with its <em>worker ID</em> will resume responsibility of processing this <em>shard</em>.</p>
+
+<p>So if a worker is terminated, the remaining workers will see this once the configured heartbeat time out has expired and one of them will succeed in taking over the processing of this <em>shard</em>.</p>
+
+
+        </div>
+        <div class="span3">
+          <img src="/ReactoKinesix/img/logo.png" alt="F# Project" style="width:150px;margin:10px" />  
+          <ul class="nav nav-list" id="menu" style="margin-top: 20px;">
+            <li class="nav-header">ReactoKinesix</li>
+            <li><a href="/ReactoKinesix/index.html">Home page</a></li>
+            <li class="divider"></li>
+            <li><a href="http://nuget.org/packages/ReactoKinesix">Get Library via NuGet</a></li>
+            <li><a href="http://github.com/theburningmonk/ReactoKinesix">Source Code on GitHub</a></li>
+            <li><a href="/ReactoKinesix/license.html">License</a></li>
+            <li><a href="/ReactoKinesix/release-notes.html">Release Notes</a></li>
+
+            <li class="nav-header">Tutorials</li>
+            <li><a href="/ReactoKinesix/example-csharp.html">C# example</a></li>
+              <li><a href="/ReactoKinesix/example-fsharp.html">F# example</a></li>
+
+            <li class="nav-header">Documentation</li>
+            <li><a href="/ReactoKinesix/getting-started.html">Getting Started</a></li>              
+            <li><a href="/ReactoKinesix/features.html">Features</a></li>              
+            <li><a href="/ReactoKinesix/error-handling.html">Error Handling</a></li>              
+            <li><a href="/ReactoKinesix/distributed-processing.html">Distributed Processing</a></li>              
+            <li><a href="/ReactoKinesix/reference/index.html">API Reference</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <a href="http://github.com/theburningmonk/ReactoKinesix"><img style="position: absolute; top: 0; right: 0; border: 0;" src="https://s3.amazonaws.com/github/ribbons/forkme_right_gray_6d6d6d.png" alt="Fork me on GitHub"/></a>
+  </body>
+  </html>
