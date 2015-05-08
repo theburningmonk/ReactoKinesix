@@ -2,7 +2,7 @@
 open System.Reflection
 open System.Runtime.CompilerServices
 
-[<assembly: AssemblyTitleAttribute("ReactoKinesix")>]
+[<assembly: AssemblyTitleAttribute("ReactoKinesix.ExampleFs")>]
 [<assembly: AssemblyProductAttribute("ReactoKinesix")>]
 [<assembly: AssemblyDescriptionAttribute("A Rx-based .Net client library for Amazon Kinesis")>]
 [<assembly: AssemblyVersionAttribute("0.4.0")>]

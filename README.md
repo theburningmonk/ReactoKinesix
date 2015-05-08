@@ -95,7 +95,7 @@ let act (record : Record) =
 """         record.SequenceNumber msg  
 
 let processor = { new IRecordProcessor with 
-                    member this.Process record = act record
+                    member this.Process(shardId, record) = act record
                     member this.GetErrorHandlingMode _ = RetryAndStop 3
                     member this.OnMaxRetryExceeded (record, mode) = maxRetryExceeded record mode }
 

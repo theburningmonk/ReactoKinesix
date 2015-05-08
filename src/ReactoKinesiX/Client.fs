@@ -103,7 +103,10 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
     
     let runScheduledTask freq job = 
         let wrapped = job |> Async.Catch |> Async.Ignore
-        Observable.Interval(freq).Subscribe(fun _ -> Async.Start(wrapped, cts.Token))
+        Observable
+            .Interval(freq)
+            .Subscribe(fun _ -> 
+                Async.StartImmediate(wrapped, cancellationToken = cts.Token))
         
     let updateShardProcessors (shardIds : string seq) (update : ShardId -> Async<unit>) = 
         async {
@@ -164,7 +167,13 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
                     knownShards.Remove(shardId) |> ignore
                     reply.Reply()
         }
-    let controller = Agent<ControlMessage>.StartProtected(body, cts.Token, onRestart = fun exn -> logWarn exn "Controller agent was restarted due to exception" [||])
+
+    let onControllerRestart exn = logWarn exn "Controller agent was restarted due to exception" [||]
+    let controller = 
+        Agent<ControlMessage>.StartProtected(
+            body, 
+            cts.Token, 
+            onRestart = onControllerRestart)
 
     let startShardProcessor shardId = controller.PostAndAsyncReply(fun reply -> StartShardProcessor(shardId, reply))
     let stopShardProcessor  shardId = controller.PostAndAsyncReply(fun reply -> StopShardProcessor(shardId, reply))
@@ -204,11 +213,12 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
             | Failure exn -> logWarn exn "Failed to retrieve information about shards, skipping check for stream changes..." [||]
         }
        
-    let _ = Observable.FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
-                      .Subscribe(fun _ -> 
-                            initializedEvent.Trigger(this, new EventArgs())
-                            logDebug "State table [{0}] is ready, initializing shard processors..." [| tableName |]
-                            Async.Start(checkStreamChanges, cts.Token))
+    let _ = Observable
+                .FromAsync(DynamoDBUtils.awaitStateTableReady dynamoDB tableName)
+                .Subscribe(fun _ -> 
+                    initializedEvent.Trigger(this, new EventArgs())
+                    logDebug "State table [{0}] is ready, initializing shard processors..." [| tableName |]
+                    Async.StartImmediate(checkStreamChanges, cancellationToken = cts.Token))
 
     let refreshSub = runScheduledTask config.CheckStreamChangesFrequency checkStreamChanges
 
@@ -305,9 +315,10 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
         }
 
     let shareLoadSub = runScheduledTask config.LoadBalanceFrequency shareLoad
-    let proactiveShareLoadSub = shardProcessorCountChangedEvent.Publish
-                                    .Where((=) 0)
-                                    .Subscribe(fun _ -> Async.Start(shareLoad, cts.Token))
+    let proactiveShareLoadSub = 
+        shardProcessorCountChangedEvent.Publish
+            .Where((=) 0)
+            .Subscribe(fun _ -> Async.StartImmediate(shareLoad, cts.Token))
     
     //#endregion
 
@@ -524,7 +535,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
             | _ -> 
                 logDebug "Fetching next records with iterator [{0}]" [| iterator |]
 
-                let! getRecordsResult = KinesisUtils.getRecords app.Kinesis app.Config app.StreamName shardId iterator
+                let! getRecordsResult = KinesisUtils.getRecords app.Kinesis app.Config app.StreamName shardId iterator app.Config.MaxBatchSize
                 match getRecordsResult with
                 | Success(nextIterator, batch) when nextIterator = null -> 
                     logDebug "Received batch of [{0}] records, no more records will be available (end of shard)" [| batch.Length |]
@@ -647,8 +658,10 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                              |> Observable.merge noCheckpoint
                              |> Observable.merge (maxRetryExceeded |> Observable.map (fun _ -> ()))
 
+    let initialized = initializedEvent.Publish
+
     // signal to process the next batch of records that has been received
-    let nextBatch    = initializedEvent.Publish
+    let nextBatch = initialized
                         .Merge(processingCycleEnd.Select(fun _ -> ()))
                         .TakeUntil(stopProcessing)
 
@@ -665,11 +678,13 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     // start fetching for the next batch of records straight after the last batch was received, with a minor delay if the last
     // batch was empty to reduce the number of calls to Kinesis during periods of inactivity
-    let fetchNext        = Observable.Delay(emptyReceived, app.Config.EmptyReceiveDelay)
-                           |> Observable.merge nonEmptyReceived
-    let fetchNextSub     = fetchNext
-                            .TakeUntil(stopFetching)
-                            .Subscribe(fun (iterator, _) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
+    let fetchNext    = Observable
+                        .Delay(emptyReceived, app.Config.EmptyReceiveDelay)
+                        .Merge nonEmptyReceived
+    let fetchNextSub = fetchNext
+                        .Zip(processed, fun iterator _ -> iterator)
+                        .TakeUntil(stopFetching)
+                        .Subscribe(fun (iterator, _) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
 
     // after we have received the next batch of records, wait for the nextBatch signal.
     // this could include a forced period of delay if the last batch was empty even if this batch is not empty, this is so that
@@ -710,7 +725,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
     let handoverCheckSub = 
         Observable
             .Interval(app.Config.CheckPendingHandoverRequestFrequency)
-            .SkipUntil(initializedEvent.Publish)
+            .SkipUntil(initialized)
             .TakeUntil(stopProcessing)
             .Subscribe(fun _ -> Async.Start(checkPendingHandoverRequest, cts.Token))
                 
@@ -788,7 +803,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     // keep retrying failed initializations until it succeeds
     let retryInitSub = initializationFailedEvent.Publish
-                        .TakeUntil(initializedEvent.Publish)
+                        .TakeUntil(initialized)
                         .Subscribe(fun _ -> Async.Start(init, cts.Token))
 
     do Async.Start(init, cts.Token)

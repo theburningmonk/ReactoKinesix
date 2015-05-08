@@ -22,7 +22,7 @@ open ReactoKinesix.Utils
 type internal MetricsAgent (cloudWatch : IAmazonCloudWatch,
                             appName    : string,
                             streamName) =
-    let logger  = LogManager.GetLogger("MetricsAgent")
+    let logger = LogManager.GetLogger("MetricsAgent")
     
     let (StreamName streamName) = streamName
     let metricNs, appDimName, streamDimName, shardDimName = "Reacto-KinesiX", "AppName", "StreamName", "ShardId"
@@ -61,34 +61,34 @@ type internal MetricsAgent (cloudWatch : IAmazonCloudWatch,
                     reply.Reply(metricsData.Values |> Seq.toArray)
                     metricsData.Clear()
         }
-    let agent = Agent<MetricsAgentMessage>.Start(body)
-    do agent.Error.Add(fun exn -> logger.Warn("Metrics agent encountered an unhandled error. Ignoring.", exn))
+    let handleAgentExn exn = logger.Warn("Metrics agent recovered from an unhandled error.", exn)
+    let agent = Agent<MetricsAgentMessage>.StartProtected(body, onRestart = handleAgentExn)
+    do agent.Error.Add handleAgentExn
     
     let pushMetrics = 
         async {
-            let! metrics = agent.PostAndAsyncReply Flush
+            let! metrics = agent.PostAndAsyncReply(Flush, 1000) // timeout of 1s here
             do! CloudWatchUtils.pushMetrics cloudWatch metricNs metrics
         }
+        |> Async.Catch
+        |> Async.Ignore
         
-    let startTimer onElapsed (interval : TimeSpan)  = 
+    let startTimer onElapsed (interval : TimeSpan) =
         let timer = new Timer(interval.TotalMilliseconds)
         do timer.Elapsed.Add onElapsed
-        do timer.Start() 
+        do timer.Start()
         timer
 
-    let pushTimer  = TimeSpan.FromMinutes(1.0) |> startTimer (fun _ -> Async.Start pushMetrics)
+    let pushTimer = 
+        TimeSpan.FromMinutes(1.0) 
+        |> startTimer (fun _ -> Async.RunSynchronously pushMetrics)
 
     let disposeInvoked = ref 0
     let cleanup (disposing : bool) =
         if System.Threading.Interlocked.CompareExchange(disposeInvoked, 1, 0) = 0 then
             logger.Debug("Disposing...")
-            pushTimer.Dispose()
-
-            try
-                Async.RunSynchronously pushMetrics
-            with 
-            | exn -> logger.Warn("Failed to flush remaining metrics, skipping...", exn)
-
+            pushTimer.Dispose()            
+            Async.RunSynchronously pushMetrics
             logger.Debug("Disposed.")
 
     member this.TrackHandover () =

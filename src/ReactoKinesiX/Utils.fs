@@ -177,11 +177,13 @@ module internal Utils =
                                       ?cancellationToken : CancellationToken,
                                       ?onRestart : Exception -> unit) = 
             let onRestart = defaultArg onRestart (fun _ -> ())
-            let watchdog f x = async {
-                while true do
-                    try
-                        do! f x
-                    with exn -> onRestart(exn)
+            let rec watchdog f x = async {
+                let! res = f x |> Async.Catch
+                match res with
+                | Choice1Of2 _ -> return ()
+                | Choice2Of2 exn -> 
+                    onRestart(exn)
+                    return! watchdog f x
             }
 
             Agent.Start((fun inbox -> watchdog body inbox), ?cancellationToken = cancellationToken)
@@ -231,15 +233,17 @@ module internal CloudWatchUtils =
 
         let pushMetricsInternal (cloudWatch : IAmazonCloudWatch) req =
             async {
-                let! res = Async.WithRetry(cloudWatch.PutMetricDataAsync(req) |> Async.AwaitTask, 2)
+                let! res = Async.WithRetry(cloudWatch.PutMetricDataAsync(req) |> Async.AwaitTask, 1)
                 match res with
                 | Success _   -> logDebug "Successfully pushed [{0}] metrics." [| req.MetricData.Count |]
-                | Failure exn -> logWarn  exn "Failed to push [{0}] metrics.\n{1}" [| req.MetricData.Count; exn |]
+                | Failure exn -> logWarn exn "Failed to push [{0}] metrics.\n{1}" [| req.MetricData.Count; exn |]
             }
 
         async {
             logDebug "Pushing [{0}] metrics in [{1}] batches." [| metrics.Length; requests.Length |]
-            do! requests |> Seq.map (pushMetricsInternal cloudWatch) |> Async.Parallel |> Async.Ignore
+            // DON'T push metrics in parallel, avoids spikes in CPU/thread/bandwidth usage
+            for req in requests do
+                do! pushMetricsInternal cloudWatch req
         }
 
 module internal KinesisUtils =
@@ -306,12 +310,13 @@ module internal KinesisUtils =
                    (config : ReactoKinesixConfig) 
                    streamName 
                    shardId
-                   iterator = 
+                   iterator
+                   batchSize = 
         async {
             match iterator with
             | EndOfShard -> return Failure(ShardCannotBeIteratedException)
             | _ ->
-                let req = GetRecordsRequest()
+                let req = GetRecordsRequest(Limit = batchSize)
 
                 match iterator with  
                 | IteratorToken(token) -> req.ShardIterator <- token

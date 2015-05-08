@@ -38,3 +38,8 @@ Bug fix:
 
 #### 0.3.0 - Oct 7, 2014
 - shard ID is passed to the shard processor
+
+#### 0.4.0 - May 8, 2015
+- for background/scheduled tasks start them on the current thread over always queue it up to threadpool
+- only fetch after successful processing
+- allow consumer to configure max batch size

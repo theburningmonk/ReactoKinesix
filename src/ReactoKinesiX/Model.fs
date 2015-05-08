@@ -59,6 +59,9 @@ type ReactoKinesixConfig () =
     /// How to handle errors? Default is to retry twice and then skip.
     member val ErrorHandlingMode       = RetryAndSkip(2) with get, set
 
+    /// Max number of records in each batch. Default is 10000. 
+    member val MaxBatchSize            = 10000 with get, set
+
 /// Represents a record received from the stream
 type Record = 
     {
