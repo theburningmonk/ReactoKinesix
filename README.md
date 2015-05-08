@@ -1,5 +1,7 @@
 [![Issue Stats](http://issuestats.com/github/theburningmonk/ReactoKinesix/badge/issue)](http://issuestats.com/github/theburningmonk/ReactoKinesix)
 [![Issue Stats](http://issuestats.com/github/theburningmonk/ReactoKinesix/badge/pr)](http://issuestats.com/github/theburningmonk/ReactoKinesix)
+[![Travis build status](https://travis-ci.org/theburningmonk/ReactoKinesiX.png)](https://travis-ci.org/theburningmonk/ReactoKinesiX)
+[![AppVeyor Build status](https://ci.appveyor.com/api/projects/status/em45jjc8u2rnm88g/branch/develop)](https://ci.appveyor.com/project/theburningmonk/ReactoKinesix/branch/develop)
 [![NuGet Status](http://img.shields.io/nuget/v/Paket.svg?style=flat)](https://www.nuget.org/packages/reactokinesix/)
 
 Reacto-Kinesix
