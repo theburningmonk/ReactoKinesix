@@ -32,27 +32,24 @@
       <div class="row">
         <div class="span9" id="main">
           
-<h4><a name="0-1-0-Jan-01-2014" class="anchor" href="#0-1-0-Jan-01-2014">0.1.0 - Jan 01, 2014</a></h4>
+<h4><a name="0-4-0-May-8-2015" class="anchor" href="#0-4-0-May-8-2015">0.4.0 - May 8, 2015</a></h4>
 
 <ul>
-<li>Initial release</li>
+<li>for background/scheduled tasks start them on the current thread over always queue it up to threadpool</li>
+<li>only fetch after successful processing</li>
+<li>allow consumer to configure max batch size</li>
 </ul>
 
-<h4><a name="0-2-0-beta-Mar-10-2014" class="anchor" href="#0-2-0-beta-Mar-10-2014">0.2.0-beta - Mar 10, 2014</a></h4>
+<h4><a name="0-3-0-Oct-7-2014" class="anchor" href="#0-3-0-Oct-7-2014">0.3.0 - Oct 7, 2014</a></h4>
 
-<p>Breaking changes:
-- record processor processes batch at a time
-- record processor needs to respond with status and whether or not to place checkpoint after each batch
-- kinesis app takes in a processor factory instead of processor instance</p>
+<ul>
+<li>shard ID is passed to the shard processor</li>
+</ul>
 
-<p>Bug fixes:
-- fixed bug with wrong type of exception being checked in DynamoDBUtils.createTable
-- fixed bug where ShardId attribute is assumed to be always present even when there's no data in the table
-- handle exceptions other than ResourceNotFound during init state table phase</p>
+<h4><a name="0-2-1-Oct-3-2014" class="anchor" href="#0-2-1-Oct-3-2014">0.2.1 - Oct 3, 2014</a></h4>
 
-<p>Minor:
-- added stubs for dynamodb and kinesis
-- added unit tests</p>
+<p>Bug fix:
+- fixed 'The input sequence was empty.' exception when attempting to share load</p>
 
 <h4><a name="0-2-0-Sep-30-2014" class="anchor" href="#0-2-0-Sep-30-2014">0.2.0 - Sep 30, 2014</a></h4>
 
@@ -71,23 +68,26 @@
 - added unit tests
 - updated log4net and AWSSDK dependencies to latest</p>
 
-<h4><a name="0-2-1-Oct-3-2014" class="anchor" href="#0-2-1-Oct-3-2014">0.2.1 - Oct 3, 2014</a></h4>
+<h4><a name="0-2-0-beta-Mar-10-2014" class="anchor" href="#0-2-0-beta-Mar-10-2014">0.2.0-beta - Mar 10, 2014</a></h4>
 
-<p>Bug fix:
-- fixed 'The input sequence was empty.' exception when attempting to share load</p>
+<p>Breaking changes:
+- record processor processes batch at a time
+- record processor needs to respond with status and whether or not to place checkpoint after each batch
+- kinesis app takes in a processor factory instead of processor instance</p>
 
-<h4><a name="0-3-0-Oct-7-2014" class="anchor" href="#0-3-0-Oct-7-2014">0.3.0 - Oct 7, 2014</a></h4>
+<p>Bug fixes:
+- fixed bug with wrong type of exception being checked in DynamoDBUtils.createTable
+- fixed bug where ShardId attribute is assumed to be always present even when there's no data in the table
+- handle exceptions other than ResourceNotFound during init state table phase</p>
+
+<p>Minor:
+- added stubs for dynamodb and kinesis
+- added unit tests</p>
+
+<h4><a name="0-1-0-Jan-01-2014" class="anchor" href="#0-1-0-Jan-01-2014">0.1.0 - Jan 01, 2014</a></h4>
 
 <ul>
-<li>shard ID is passed to the shard processor</li>
-</ul>
-
-<h4><a name="0-4-0-May-8-2015" class="anchor" href="#0-4-0-May-8-2015">0.4.0 - May 8, 2015</a></h4>
-
-<ul>
-<li>for background/scheduled tasks start them on the current thread over always queue it up to threadpool</li>
-<li>only fetch after successful processing</li>
-<li>allow consumer to configure max batch size</li>
+<li>Initial release</li>
 </ul>
 
 
