@@ -5,11 +5,11 @@ using System.Runtime.CompilerServices;
 [assembly: AssemblyTitleAttribute("ReactoKinesix.ExampleCs")]
 [assembly: AssemblyProductAttribute("ReactoKinesix")]
 [assembly: AssemblyDescriptionAttribute("A Rx-based .Net client library for Amazon Kinesis")]
-[assembly: AssemblyVersionAttribute("0.3.0")]
-[assembly: AssemblyFileVersionAttribute("0.3.0")]
+[assembly: AssemblyVersionAttribute("0.4.0")]
+[assembly: AssemblyFileVersionAttribute("0.4.0")]
 [assembly: InternalsVisibleToAttribute("ReactoKinesiX.Tests")]
 namespace System {
     internal static class AssemblyVersionInformation {
-        internal const string Version = "0.3.0";
+        internal const string Version = "0.4.0";
     }
 }
