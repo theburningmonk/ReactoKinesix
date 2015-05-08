@@ -2,7 +2,7 @@
 [![Issue Stats](http://issuestats.com/github/theburningmonk/ReactoKinesix/badge/pr)](http://issuestats.com/github/theburningmonk/ReactoKinesix)
 [![NuGet Status](http://img.shields.io/nuget/v/Paket.svg?style=flat)](https://www.nuget.org/packages/reactokinesix/)
 
-Reacto-Kinesix ([@ReactoKinesix](https://twitter.com/ReactoKinesix))
+Reacto-Kinesix
 =======================
 
 A [Rx](https://rx.codeplex.com/)-based .Net client library for [Amazon Kinesis](http://aws.amazon.com/kinesis/).
