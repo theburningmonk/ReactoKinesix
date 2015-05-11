@@ -337,7 +337,7 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
 
             let shardProcessorCount = getShardProcessorCount()
             if shardProcessorCount > 0 then
-                logDebug "Stopping all [{0}] shard processor..." [| shardProcessorCount |]
+                logInfo "Stopping all [{0}] shard processor..." [| shardProcessorCount |]
 
                 workingShards 
                 |> Seq.choose (fun (KeyValue(shardId, workingShard)) -> 
@@ -349,7 +349,7 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
                 
                 shardProcessorCountChangedEvent.Publish.Where(fun n -> n = 0).Take(1).Wait() |> ignore
 
-                logDebug "Shard processors stopped..." [||]
+                logInfo "Shard processors stopped..." [||]
             
             shardProcessorCountSub.Dispose()
 
