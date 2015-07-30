@@ -554,14 +554,24 @@ module internal DynamoDBUtils =
                             (ShardId    shardId) =
         async {
             let req = new UpdateItemRequest(TableName = tableName)
-            req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
+            req.Key.Add(
+                shardIdAttr, 
+                new AttributeValue(S = shardId))
         
-            let expectedAttrVal = new ExpectedAttributeValue(Value = new AttributeValue(S = workerId), Exists = true)
+            let expectedAttrVal = 
+                new ExpectedAttributeValue(
+                    Value  = new AttributeValue(S = workerId), 
+                    Exists = true)
             req.Expected.Add(workerIdAttr, expectedAttrVal)
 
             // whilst updating the table, always update the heartbeat whilst we're at it
-            let newHeartbeatValue = new AttributeValue(S = getHeartbeatTimestamp())
-            req.AttributeUpdates.Add(lastHeartbeatAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newHeartbeatValue))
+            let newHeartbeatValue = 
+                new AttributeValue(S = getHeartbeatTimestamp())
+            req.AttributeUpdates.Add(
+                lastHeartbeatAttr, 
+                new AttributeValueUpdate(
+                    Action = AttributeAction.PUT, 
+                    Value  = newHeartbeatValue))
         
             update req
 
@@ -574,7 +584,7 @@ module internal DynamoDBUtils =
     /// Updates the heartbeat value for the specified shard conditionally against the worker ID so that
     /// if for some reason another worker has taken over this shard then we shall stop processing this shard
     let updateHeartbeat : IAmazonDynamoDB -> TableName -> WorkerId -> ShardId -> Async<unit> = 
-        updateShard (fun _ -> ())
+        updateShard ignore
 
     /// Updates the sequence number checkpoint for the specified shard conditionally against the worker
     /// ID so that if for some reason another worker has taken over this shard then we shall stop
@@ -582,7 +592,11 @@ module internal DynamoDBUtils =
     let updateCheckpoint (SequenceNumber seqNumber) = 
         let update (req : UpdateItemRequest) = 
             let newCheckpointValue = new AttributeValue(S = seqNumber)
-            req.AttributeUpdates.Add(checkpointAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newCheckpointValue))
+            req.AttributeUpdates.Add(
+                checkpointAttr, 
+                new AttributeValueUpdate(
+                    Action = AttributeAction.PUT, 
+                    Value  = newCheckpointValue))
                     
         updateShard update
 
@@ -591,7 +605,11 @@ module internal DynamoDBUtils =
     let updateIsClosed (isClosed : bool) =
         let update (req : UpdateItemRequest) = 
             let newIsClosedValue = new AttributeValue(S = isClosed.ToString())
-            req.AttributeUpdates.Add(isClosedAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newIsClosedValue))
+            req.AttributeUpdates.Add(
+                isClosedAttr, 
+                new AttributeValueUpdate(
+                    Action = AttributeAction.PUT, 
+                    Value  = newIsClosedValue))
                         
         updateShard update
 
@@ -599,8 +617,15 @@ module internal DynamoDBUtils =
     let updateWorkerId (WorkerId newWorkerId) =
         let update (req : UpdateItemRequest) =
             let newWorkerIdValue = new AttributeValue(S = newWorkerId)
-            req.AttributeUpdates.Add(workerIdAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newWorkerIdValue))
-            req.AttributeUpdates.Add(handoverReqAttr, new AttributeValueUpdate(Action = AttributeAction.DELETE))
+            req.AttributeUpdates.Add(
+                workerIdAttr, 
+                new AttributeValueUpdate(
+                    Action = AttributeAction.PUT, 
+                    Value  = newWorkerIdValue))
+            req.AttributeUpdates.Add(
+                handoverReqAttr, 
+                new AttributeValueUpdate(
+                    Action = AttributeAction.DELETE))
 
         updateShard update
 
@@ -625,8 +650,14 @@ module internal DynamoDBUtils =
                     ToWorker   = toWorkerId
                     Expiry     = expiry
                 }
-            let handoverReqVal = new AttributeValue(S = serializeHandoverReq handoverReq)
-            req.AttributeUpdates.Add(handoverReqAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = handoverReqVal))
+            let handoverReqVal = 
+                new AttributeValue(
+                    S = serializeHandoverReq handoverReq)
+            req.AttributeUpdates.Add(
+                handoverReqAttr, 
+                new AttributeValueUpdate(
+                    Action = AttributeAction.PUT, 
+                    Value  = handoverReqVal))
             
             // exception handling for this is done in the client code based on the operation (heartbeat or checkpoint)
             let! _ = dynamoDB.UpdateItemAsync(req) |> Async.AwaitTask

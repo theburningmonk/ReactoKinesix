@@ -470,12 +470,18 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
             async {
                 logDebug "Sending heartbeat..." [||]
 
-                let! res = DynamoDBUtils.updateHeartbeat app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
+                let! res = DynamoDBUtils.updateHeartbeat 
+                                app.DynamoDB 
+                                app.TableName 
+                                app.WorkerId 
+                                shardId 
+                           |> Async.Catch
                 match res with
                 | Choice1Of2 () -> heartbeatEvent.Trigger()
                 | Choice2Of2 (Flatten exn) -> 
                     match exn with 
-                    | :? ConditionalCheckFailedException -> conditionalCheckFailedEvent.Trigger()
+                    | :? ConditionalCheckFailedException -> 
+                        conditionalCheckFailedEvent.Trigger()
                     | exn -> 
                         // TODO : what's the right thing to do here?
                         // a) give up, let the next cycle (or next checkpoint update) update the heartbeat
@@ -493,49 +499,73 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
     let rec updateIsClosed () =
         let work = 
             async {
-                let! res = DynamoDBUtils.updateIsClosed true app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
+                let! res = DynamoDBUtils.updateIsClosed 
+                                true 
+                                app.DynamoDB 
+                                app.TableName 
+                                app.WorkerId shardId 
+                           |> Async.Catch
                 match res with
                 | Choice1Of2 ()  -> ()
                 | Choice2Of2 (Flatten exn) -> 
                     match exn with
-                    | :? ConditionalCheckFailedException -> conditionalCheckFailedEvent.Trigger()
-                    | exn -> logError exn "Failed to set IsClosed flag to true, retrying..." [||]
-                             updateIsClosed()
+                    | :? ConditionalCheckFailedException -> 
+                        conditionalCheckFailedEvent.Trigger()
+                    | exn -> 
+                        logError exn "Failed to set IsClosed flag to true, retrying..." [||]
+                        updateIsClosed()
             }
         Async.Start(work, cts.Token)
 
     let rec updateCheckpoint seqNum = 
         let work = 
             async {
-                let! res = DynamoDBUtils.updateCheckpoint seqNum app.DynamoDB app.TableName app.WorkerId shardId |> Async.Catch
+                let! res = DynamoDBUtils.updateCheckpoint 
+                                seqNum 
+                                app.DynamoDB 
+                                app.TableName 
+                                app.WorkerId 
+                                shardId 
+                           |> Async.Catch
                 match res with
-                | Choice1Of2 () -> logDebug "Updated sequence number checkpoint [{0}]" [| seqNum |]
-                                   checkpointEvent.Trigger(seqNum)
+                | Choice1Of2 () -> 
+                    logDebug "Updated sequence number checkpoint [{0}]" [| seqNum |]
+                    checkpointEvent.Trigger(seqNum)
                 | Choice2Of2 (Flatten exn) -> 
                     match exn with 
-                    | :? ConditionalCheckFailedException -> conditionalCheckFailedEvent.Trigger()
-                    | exn -> // TODO : what's the right thing to do here if we failed to update checkpoint? 
-                             // a) keep going and risk allowing more records to be processed multiple times
-                             // b) crash and let the last batch of records be processed against
-                             // c) wait and recurse until we succeed until some other worker takes over
-                             //    processing of the shard in which case we get conditional check failed
-                             // for now, try option c) with a 1 second delay as the risk of processing the same
-                             // records can ony be determined by the consumer, perhaps expose some configurable
-                             // behaviour under these circumstances?
-                             logError exn "Failed to update checkpoint to [{0}]...retrying" [| seqNum |]
-                             do! Async.Sleep(1000)
-                             updateCheckpoint seqNum
+                    | :? ConditionalCheckFailedException -> 
+                        conditionalCheckFailedEvent.Trigger()
+                    | exn -> 
+                        // TODO : what's the right thing to do here if we failed to update checkpoint? 
+                        // a) keep going and risk allowing more records to be processed multiple times
+                        // b) crash and let the last batch of records be processed against
+                        // c) wait and recurse until we succeed until some other worker takes over
+                        //    processing of the shard in which case we get conditional check failed
+                        // for now, try option c) with a 1 second delay as the risk of processing the same
+                        // records can ony be determined by the consumer, perhaps expose some configurable
+                        // behaviour under these circumstances?
+                        logError exn "Failed to update checkpoint to [{0}]...retrying" [| seqNum |]
+                        do! Async.Sleep(1000)
+                        updateCheckpoint seqNum
             }
         Async.Start(work, cts.Token)
 
-    let rec fetchNextRecords iterator = 
+    let rec fetchNextRecords iterator (seqNum : SequenceNumber option) = 
         async {
             match iterator with
             | EndOfShard -> shardClosedEvent.Trigger()
             | _ -> 
                 logDebug "Fetching next records with iterator [{0}]" [| iterator |]
 
-                let! getRecordsResult = KinesisUtils.getRecords app.Kinesis app.Config app.StreamName shardId iterator app.Config.MaxBatchSize
+                let! getRecordsResult = 
+                    KinesisUtils.getRecords 
+                        app.Kinesis 
+                        app.Config 
+                        app.StreamName 
+                        shardId 
+                        iterator 
+                        app.Config.MaxBatchSize
+
                 match getRecordsResult with
                 | Success(nextIterator, batch) when nextIterator = null -> 
                     logDebug "Received batch of [{0}] records, no more records will be available (end of shard)" [| batch.Length |]
@@ -545,8 +575,17 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                     batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
                 | Failure(exn) -> 
                     match exn with
-                    | :? ShardCannotBeIteratedException -> shardClosedEvent.Trigger()
-                    | _ -> do! fetchNextRecords iterator
+                    | :? ShardCannotBeIteratedException  -> shardClosedEvent.Trigger()
+                    | :? ExpiredIteratorException as exn when seqNum.IsSome -> 
+                        logWarn exn
+                                """Iterator [{0}] expired, retrying with Sequence Number [{1}]...
+WARNING : your process might be taking too long to process one batch, please consider
+changing the size of the batch via `ReactoKinesixConfig`. If this problem persists
+then you run the risk of data lost as Kinesis only keep data for 24 hours."""
+                                [| iterator; seqNum.Value |]
+                        let iterator' = NoIteratorToken <| AfterSequenceNumber seqNum.Value
+                        do! fetchNextRecords iterator' seqNum
+                    | _ -> do! fetchNextRecords iterator seqNum
         }
 
     let processBatch (iterator, records : Record[]) =
@@ -567,8 +606,9 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
         let inline processWithRetry maxRetries cont = 
             let rec loop retries cont =
                 match recordCount with
-                | 0 -> batchProcessedEvent.Trigger(iterator, records, processor)
-                       noCheckpointEvent.Trigger()
+                | 0 ->
+                    batchProcessedEvent.Trigger(iterator, records, processor)
+                    noCheckpointEvent.Trigger()
                 | n ->
                     match tryProcess records with
                     | { Status = Status.Success; Checkpoint = checkpoint } -> 
@@ -610,10 +650,16 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     let checkPendingHandoverRequest =
         async {
-            let! res = DynamoDBUtils.getHandoverRequest app.DynamoDB app.Config app.TableName shardId
+            let! res = DynamoDBUtils.getHandoverRequest 
+                            app.DynamoDB 
+                            app.Config 
+                            app.TableName 
+                            shardId
             match res with            
-            | Failure exn  -> logError exn "Failed to check for pending handover requests" [||]
-            | Success None -> logDebug "No pending handover request found" [||]
+            | Failure exn  -> 
+                logError exn "Failed to check for pending handover requests" [||]
+            | Success None -> 
+                logDebug "No pending handover request found" [||]
             | Success (Some { ToWorker = toWorker; Expiry = expiry }) -> 
                 logDebug "Received handover request to give control of shard to worker [{0}], request expiry at [{1}]" [| toWorker; expiry |]
 
@@ -625,17 +671,28 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     //#region Event compositions and subscriptions
 
-    // stop processing anymore records if we encountered conditional check errors (indicative of another worker having taken over
-    // control of the shard from us), or if we were explicitly told to stop (indicated by the stoppingProcessingEvent)
-    let stopProcessing = stopProcessingEvent.Publish
-                            .Merge(conditionalCheckFailedEvent.Publish.Select(fun _ -> StoppedReason.ConditionalCheckFailed))
-                            .Take(1)
-    let _ = stopProcessing.Subscribe(fun reason -> logInfo "Stopping [{0}]..." [| reason |])
+    // stop processing anymore records if we encountered conditional check
+    // errors (indicative of another worker having taken over control of 
+    // the shard from us), or if we were explicitly told to stop (indicated 
+    // by the stoppingProcessingEvent)
+    let conditionalCheckFailed = 
+        conditionalCheckFailedEvent
+            .Publish
+            .Select(fun _ -> StoppedReason.ConditionalCheckFailed)
+    let stopProcessing = 
+        stopProcessingEvent
+            .Publish
+            .Merge(conditionalCheckFailed)
+            .Take(1)
+    let _ = 
+        stopProcessing.Subscribe(fun reason -> 
+            logInfo "Stopping [{0}]..." [| reason |])
 
     let stopped = stoppedEvent.Publish.Take(1)
-    let _       = stopped.Subscribe(fun reason -> 
-                    logInfo "Processing has stopped [{0}]." [| reason |]
-                    (this :> IDisposable).Dispose())
+    let _       =
+        stopped.Subscribe(fun reason -> 
+            logInfo "Processing has stopped [{0}]." [| reason |]
+            (this :> IDisposable).Dispose())
 
     let heartbeatSub = 
         Observable
@@ -654,55 +711,81 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
     let checkpoint         = checkpointEvent.Publish.Select(fun _ -> ())
     let noCheckpoint       = noCheckpointEvent.Publish
     let maxRetryExceeded   = maxRetryExceededEvent.Publish
-    let processingCycleEnd = checkpoint
-                             |> Observable.merge noCheckpoint
-                             |> Observable.merge (maxRetryExceeded |> Observable.map (fun _ -> ()))
+    let processingCycleEnd = 
+        checkpoint
+        |> Observable.merge noCheckpoint
+        |> Observable.merge (maxRetryExceeded |> Observable.map ignore)
 
     let initialized = initializedEvent.Publish
 
     // signal to process the next batch of records that has been received
-    let nextBatch = initialized
-                        .Merge(processingCycleEnd.Select(fun _ -> ()))
-                        .TakeUntil(stopProcessing)
+    let nextBatch = 
+        initialized
+            .Merge(processingCycleEnd.Select(fun _ -> ()))
+            .TakeUntil(stopProcessing)
 
     let batchReceived    = batchReceivedEvent.Publish
-    let batchReceivedSub = batchReceived.Subscribe(fun (_, records : Record[]) -> metricsAgent.TrackFetched(shardId, records.Length))
+    let batchReceivedSub = 
+        batchReceived.Subscribe(fun (_, records : Record[]) -> 
+            metricsAgent.TrackFetched(shardId, records.Length))
 
-    // fetch new records after the previous batch has been processed until we need to either stop processing or the shard is closed
-    let stopFetching     = shardClosedEvent.Publish
-                           |> Observable.map (fun _ -> StoppedReason.ShardClosed)
-                           |> Observable.merge stopProcessing
+    // fetch new records after the previous batch has been processed until 
+    // we need to either stop processing or the shard is closed
+    let stopFetching = 
+        shardClosedEvent.Publish
+        |> Observable.map (fun _ -> StoppedReason.ShardClosed)
+        |> Observable.merge stopProcessing
 
-    let emptyReceived    = batchReceived |> Observable.filter (fun (_, records) -> records.Length = 0)
-    let nonEmptyReceived = batchReceived |> Observable.filter (fun (_, records) -> records.Length > 0)
+    let emptyReceived = 
+        batchReceived 
+        |> Observable.filter (fun (_, records) -> records.Length = 0)
+    let nonEmptyReceived = 
+        batchReceived 
+        |> Observable.filter (fun (_, records) -> records.Length > 0)
 
-    // start fetching for the next batch of records straight after the last batch was received, with a minor delay if the last
-    // batch was empty to reduce the number of calls to Kinesis during periods of inactivity
-    let fetchNext    = Observable
-                        .Delay(emptyReceived, app.Config.EmptyReceiveDelay)
-                        .Merge nonEmptyReceived
-    let fetchNextSub = fetchNext
-                        .Zip(processed, fun iterator _ -> iterator)
-                        .TakeUntil(stopFetching)
-                        .Subscribe(fun (iterator, _) -> Async.StartImmediate(fetchNextRecords iterator, cts.Token))
+    // start fetching for the next batch of records straight after the last
+    // batch was received, with a minor delay if the last batch was empty 
+    // to reduce the number of calls to Kinesis during periods of inactivity
+    let fetchNext = 
+        Observable
+            .Delay(emptyReceived, app.Config.EmptyReceiveDelay)
+            .Merge nonEmptyReceived
+    let fetchNextSub = 
+        fetchNext
+            .Zip(processed, fun iterator _ -> iterator)
+            .TakeUntil(stopFetching)
+            .Subscribe(fun (iterator, records) ->
+                let seqNum = 
+                    (Seq.last records).SequenceNumber 
+                    |> SequenceNumber 
+                    |> Some
+                Async.StartImmediate(fetchNextRecords iterator seqNum, cts.Token))
 
     // after we have received the next batch of records, wait for the nextBatch signal.
     // this could include a forced period of delay if the last batch was empty even if this batch is not empty, this is so that
     // we don't spam Kinesis with too many calls when there are no records to process
-    let processing       = batchReceived
-                            .Zip(nextBatch, fun receivedBatch _ -> receivedBatch)
-                            .TakeUntil(stopProcessing)
-    let processingSub    = processing.Subscribe(processBatch)
+    let processing = 
+        batchReceived
+            .Zip(nextBatch, fun receivedBatch _ -> receivedBatch)
+            .TakeUntil(stopProcessing)
+    let processingSub = processing.Subscribe(processBatch)
 
-    let processedSub     = processed.Subscribe(fun (_, records : Record[], _) -> metricsAgent.TrackSuccess(shardId, records.Length, records |> Seq.sumBy (fun r -> r.Data.Length)))
-    let errorSub         = batchErrorEvent.Publish.Subscribe(fun _ -> metricsAgent.TrackError(shardId))
+    let processedSub = 
+        processed
+            .Subscribe(fun (_, records : Record[], _) -> 
+                let dataSize = records |> Seq.sumBy (fun r -> r.Data.Length)
+                metricsAgent.TrackSuccess(shardId, records.Length, dataSize))
+    let errorSub = 
+        batchErrorEvent
+            .Publish
+            .Subscribe(fun _ -> metricsAgent.TrackError(shardId))
 
     // only deal with the shard closed event the first time we see it
     let _ = shardClosedEvent.Publish.Take(1).Subscribe(onShardClosed)
 
     (* 
-     * when the stop is triggered during a current batch then the next checkpoint/no checkpoint event tells us the current batch is 
-     * finished so we can trigger the stopped event, e.g.
+     * when the stop is triggered during a current batch then the next checkpoint/no checkpoint 
+     * event tells us the current batch is finished so we can trigger the stopped event, e.g.
      *      ---processing---stop----processed----checkpoint
      *      ---processing---stop----processed----no checkpoint
      *      ---processing-------processed--stop--checkpoint
@@ -727,7 +810,8 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
             .Interval(app.Config.CheckPendingHandoverRequestFrequency)
             .SkipUntil(initialized)
             .TakeUntil(stopProcessing)
-            .Subscribe(fun _ -> Async.Start(checkPendingHandoverRequest, cts.Token))
+            .Subscribe(fun _ -> 
+                Async.Start(checkPendingHandoverRequest, cts.Token))
                 
     //#endregion
 
@@ -743,32 +827,52 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
             async {
                 // claim ownership of the shard by successfully updating the row
                 try
-                    do! DynamoDBUtils.updateWorkerId app.WorkerId app.DynamoDB app.TableName fromWorkerId shardId
+                    do! DynamoDBUtils.updateWorkerId 
+                            app.WorkerId 
+                            app.DynamoDB 
+                            app.TableName 
+                            fromWorkerId shardId
 
                     logDebug "Successfully taken over responsibility for the shard" [||]
 
                     // the shard has not been processed currently, start from the last checkpoint
-                    Async.Start(fetchNextRecords <| getIterator seqNum, cts.Token)
+                    let iterator = getIterator seqNum
+                    Async.Start(fetchNextRecords iterator seqNum, cts.Token)
                     initializedEvent.Trigger()
                 with
                 | Flatten exn ->
                     match exn with
-                    | :? ConditionalCheckFailedException -> conditionalCheckFailedEvent.Trigger()
-                    | exn -> initializationFailedEvent.Trigger(exn)
+                    | :? ConditionalCheckFailedException -> 
+                        conditionalCheckFailedEvent.Trigger()
+                    | exn -> 
+                        initializationFailedEvent.Trigger(exn)
             }
 
         async {
-            let! createShardResult = DynamoDBUtils.createShard app.DynamoDB app.TableName app.WorkerId shardId
+            let! createShardResult = 
+                DynamoDBUtils.createShard 
+                    app.DynamoDB 
+                    app.TableName 
+                    app.WorkerId 
+                    shardId
+
             match createShardResult with
             | Failure exn -> initializationFailedEvent.Trigger(exn)
             | Success _   -> 
-                let! getShardStatusResult = DynamoDBUtils.getShardStatus app.DynamoDB app.Config app.TableName shardId
+                let! getShardStatusResult = 
+                    DynamoDBUtils.getShardStatus 
+                        app.DynamoDB 
+                        app.Config 
+                        app.TableName 
+                        shardId
+
                 match getShardStatusResult with
                 | Failure exn -> initializationFailedEvent.Trigger(exn)
                 | Success status -> 
                     match status with
-                    | NotFound _ -> logger.Warn("Shard is not found. Please check if it was manually deleted from DynamoDB.")
-                                    initializationFailedEvent.Trigger(ShardNotFoundException)
+                    | NotFound _ -> 
+                        logger.Warn("Shard is not found. Please check if it was manually deleted from DynamoDB.")
+                        initializationFailedEvent.Trigger(ShardNotFoundException)
                     | Closed _   -> shardClosedEvent.Trigger()
                     | NotProcessing(_, workerId', heartbeat, seqNum) -> 
                         logDebug "Taking over shard which was processed by worker [{0}], last heartbeat [{1}] and checkpoint [{2}]"
@@ -797,14 +901,16 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                         logDebug "Resuming processing of shard, last checkpoint [{0}]" [| seqNum |]
 
                         // the shard was being processed by this worker, continue from where we left off
-                        Async.Start(fetchNextRecords <| getIterator seqNum, cts.Token)
+                        let iterator = getIterator seqNum
+                        Async.Start(fetchNextRecords iterator seqNum, cts.Token)
                         initializedEvent.Trigger()
         }
 
     // keep retrying failed initializations until it succeeds
-    let retryInitSub = initializationFailedEvent.Publish
-                        .TakeUntil(initialized)
-                        .Subscribe(fun _ -> Async.Start(init, cts.Token))
+    let retryInitSub = 
+        initializationFailedEvent.Publish
+            .TakeUntil(initialized)
+            .Subscribe(fun _ -> Async.Start(init, cts.Token))
 
     do Async.Start(init, cts.Token)
 

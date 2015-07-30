@@ -175,8 +175,8 @@ type KinesisStub () =
 
         member this.GetRecords req =
             let [| streamName; shardId; _ |] = req.ShardIterator.Split('-')
-            let stream     = getStream streamName
-            let records    = stream.GetRecords(req.ShardIterator, req.Limit)
+            let stream  = getStream streamName
+            let records = stream.GetRecords(req.ShardIterator, req.Limit)
 
             let res = new GetRecordsResponse()
             res.Records.AddRange(records |> Seq.map (fun (_, record) -> record.ToDTO()))
