@@ -756,9 +756,11 @@ then you run the risk of data lost as Kinesis only keep data for 24 hours."""
             .TakeUntil(stopFetching)
             .Subscribe(fun (iterator, records) ->
                 let seqNum = 
-                    (Seq.last records).SequenceNumber 
-                    |> SequenceNumber 
-                    |> Some
+                    match records with
+                    | [||] -> None
+                    | arr  -> (Seq.last records).SequenceNumber 
+                              |> SequenceNumber 
+                              |> Some
                 Async.StartImmediate(fetchNextRecords iterator seqNum, cts.Token))
 
     // after we have received the next batch of records, wait for the nextBatch signal.
