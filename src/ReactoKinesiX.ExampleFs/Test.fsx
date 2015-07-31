@@ -30,8 +30,9 @@ let streamName  = "YC-test"
 
 BasicConfigurator.Configure()
 
-let dynamoDB = Amazon.AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region) 
-let kinesis = Amazon.AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region) 
+let dynamoDB   = Amazon.AWSClientFactory.CreateAmazonDynamoDBClient(awsKey, awsSecret, region) 
+let kinesis    = Amazon.AWSClientFactory.CreateAmazonKinesisClient(awsKey, awsSecret, region) 
+let cloudWatch = Amazon.AWSClientFactory.CreateAmazonCloudWatchClient(awsKey, awsSecret, region) 
 
 let putRecord (payload : string) =
     let req  = new PutRecordRequest(StreamName = streamName, PartitionKey = Guid.NewGuid().ToString())
@@ -40,9 +41,7 @@ let putRecord (payload : string) =
 
 let act (record : Record) =
     let msg = Encoding.UTF8.GetString(record.Data)
-    printfn "\n\n\n\n\n\n\n\n\n\n%s : %s\n\n\n\n\n\n\n\n\n\n" record.SequenceNumber msg
-    
-    failwith "oops"
+    printfn "\n\n\n\n\n\n\n\n\n\n%s : %s\n\n\n\n\n\n\n\n\n\n" record.SequenceNumber msg    
 
 let act2 (record : Record) =
     let msg = Encoding.UTF8.GetString(record.Data)
@@ -63,20 +62,28 @@ let act3 (record : Record) =
     printfn "\n\n\n\n\n\n\n\n\n\n\n\nSleeping...\n\n\n\n\n\n\n\n\n\n\n"
     Thread.Sleep(5000)
 
-let maxRetryExceeded (record : Record) (mode : ErrorHandlingMode) =
-    printfn "\n\n\n\n\n\n\n\n\n\n%s\n%A\n\n\n\n\n\n\n\n\n\n" record.SequenceNumber mode
+let maxRetryExceeded (record : Record[]) (mode : ErrorHandlingMode) =
+    printfn "\n\n\n\n\n\n\n\n\n\n%d\n%A\n\n\n\n\n\n\n\n\n\n" record.Length mode
 
-let processor = { new IRecordProcessor with 
-                    member this.Process record = act record
-                    member this.GetErrorHandlingMode _ = RetryAndStop 3
-                    member this.OnMaxRetryExceeded (record, mode) = maxRetryExceeded record mode }
-let processor2 = { new IRecordProcessor with 
-                    member this.Process record = act2 record 
-                    member this.GetErrorHandlingMode _ = RetryAndStop 3
-                    member this.OnMaxRetryExceeded (record, mode) = maxRetryExceeded record mode }
+let processor = 
+    { new IRecordProcessor with 
+        member this.Process (_, records) = 
+            records |> Array.iter act
+            { Status = Success; Checkpoint = true }
+        member this.OnMaxRetryExceeded (records, mode) = 
+            maxRetryExceeded records mode
+        member this.Dispose() = () }
+//let processor2 = { new IRecordProcessor with 
+//                    member this.Process record = act2 record 
+//                    member this.GetErrorHandlingMode _ = RetryAndStop 3
+//                    member this.OnMaxRetryExceeded (record, mode) = maxRetryExceeded record mode }
 //let processor3 = { new IRecordProcessor with member this.Process record = act3 record }
 
-let app = ReactoKinesixApp.CreateNew(awsKey, awsSecret,region, "YC-test", streamName, "PHANTOM", processor)
+let factory = { new IRecordProcessorFactory with
+                    member this.CreateNew _ = processor }
+
+let app = ReactoKinesixApp.CreateNew(
+            kinesis, dynamoDB, cloudWatch, "YC-test", streamName, "localhost", factory)
 
 
 app.StartProcessing("shardId-000000000003")
