@@ -27,18 +27,33 @@ module KinesisTools =
     let parseTimestamp (s : string) = 
         DateTime.ParseExact(s, "yyyyMMdd::HH:mm:ss.ffff", CultureInfo.InvariantCulture)
 
-    let formatIterator streamName shardId seqNum =
-        sprintf "%s-%d-%s-%s" streamName shardId seqNum (formatTimestamp DateTime.UtcNow)
+    let (|Int|_|) x =
+        match Int32.TryParse x with
+        | true, n -> Some n
+        | _ -> None
+
+    let formatIterator streamName shardId (seqNum : string) =
+        let seqNum = 
+            match seqNum with
+            | "" | null -> ""
+            | Int n -> sprintf "%010d" n
+
+        sprintf "%s-%d-%s-%s" 
+                streamName 
+                shardId 
+                seqNum 
+                (formatTimestamp DateTime.UtcNow)
 
 type KinesisShard (streamName, limit, shardId : int) =
     let records = new List<string * KinesisRecord>()
 
-    let getSeqNumber (iteratorType : ShardIteratorType) (startingSeqNumber : string) =
+    let getSeqNumber (iteratorType : ShardIteratorType) 
+                     (startingSeqNumber : string) =
         if iteratorType = ShardIteratorType.LATEST then
             fst records.[records.Count - 1]
         elif iteratorType = ShardIteratorType.AFTER_SEQUENCE_NUMBER then
             records 
-            |> Seq.skipWhile (fun (seqNum, _) -> seqNum < startingSeqNumber)
+            |> Seq.skipWhile (fun (seqNum, _) -> seqNum <= startingSeqNumber)
             |> Seq.head
             |> fst
         elif iteratorType = ShardIteratorType.AT_SEQUENCE_NUMBER then
@@ -102,8 +117,8 @@ type KinesisStream (req : CreateStreamRequest, ?limit, ?iteratorExpiry) =
         if DateTime.UtcNow > (timestamp + iteratorExpiry) then
             raise <| TestUtils.UnsafeInit<ExpiredIteratorException>()
 
-        let shard = shards.[int shardId]      
-        shard.GetRecords(seqNum, limit)  
+        let shard = shards.[int shardId]
+        shard.GetRecords(seqNum, limit)
 
     member this.PutRecord (req : PutRecordRequest) =
         let shard  = shards.[rand.Next(shards.Count)]

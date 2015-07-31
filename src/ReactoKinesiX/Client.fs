@@ -576,12 +576,15 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                 | Failure(exn) -> 
                     match exn with
                     | :? ShardCannotBeIteratedException  -> shardClosedEvent.Trigger()
-                    | :? ExpiredIteratorException as exn when seqNum.IsSome -> 
-                        logWarn exn
-                                """Iterator [{0}] expired, retrying with Sequence Number [{1}]...
-WARNING : your process might be taking too long to process one batch, please consider
-changing the size of the batch via `ReactoKinesixConfig`. If this problem persists
-then you run the risk of data lost as Kinesis only keep data for 24 hours."""
+                    | :? ExpiredIteratorException when seqNum.IsSome -> 
+                        logInfo """
+Iterator [{0}] expired, retrying with Sequence Number [{1}]...
+-------------------------------------------------------------------------
+WARNING : your processor might be taking too long to process one batch.
+Please consider changing the size of the batch via `ReactoKinesixConfig`.
+If this problem persists then you run the risk of data loss as Kinesis 
+only keep data for 24 hours.
+-------------------------------------------------------------------------"""
                                 [| iterator; seqNum.Value |]
                         let iterator' = NoIteratorToken <| AfterSequenceNumber seqNum.Value
                         do! fetchNextRecords iterator' seqNum

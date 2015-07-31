@@ -72,9 +72,8 @@ module ``Given that an application is starting`` =
         // give it some time for the app to detect dynamodb table statuschange and then initialize the processors
         Thread.Sleep(3000)
 
-        !processors |> should equal 1
-
-        app.Dispose()
+        try !processors |> should equal 1
+        finally app.Dispose()
 
     [<Test>]
     let ``when it finishes initializing the processor should start processing available records`` () =
@@ -101,9 +100,8 @@ module ``Given that an application is starting`` =
 
         Thread.Sleep(3000)
 
-        !processed |> should equal 100
-
-        app.Dispose()
+        try !processed |> should equal 100
+        finally app.Dispose()
 
     [<Test>]
     let ``when there is a shard being processed by another worker the application should not processing it`` () =
@@ -134,9 +132,8 @@ module ``Given that an application is starting`` =
 
         Thread.Sleep(3000)
 
-        !processed |> should equal 0
-
-        app.Dispose()
+        try !processed |> should equal 0
+        finally app.Dispose()
 
 module ``Given an error occurred`` =
     open System
@@ -155,7 +152,9 @@ module ``Given an error occurred`` =
                 (fun records ->
                     // make the first batch slow, and therefore 2nd batch need to 
                     // retry with seq number
-                    if !processed = 0 then Thread.Sleep 150
+                    if !processed = 0 then 
+                        Thread.Sleep 150
+                    
                     processed := !processed + records.Length)
 
         let cloudWatch  = Mock<IAmazonCloudWatch>().Create()
@@ -182,6 +181,5 @@ module ``Given an error occurred`` =
         // give it some time for the app to detect dynamodb table statuschange and then initialize the processors
         Thread.Sleep(3000)
         
-        !processed |> should equal 100
-
-        app.Dispose()
+        try !processed |> should equal 100
+        finally app.Dispose()
