@@ -187,9 +187,15 @@ module internal InternalModel =
             | Processing    (shardId, _, _, _)
             | HandingOver   (shardId, _, _, _) -> shardId
 
-    type Result<'Success, 'Failure> =
+    type Result<'Success> =
         | Success   of 'Success
-        | Failure   of 'Failure
+        | Failure   of exn
+
+        static member Bind (cont : 'a -> 'Success)
+                           (x    : Result<'a>) =
+            match x with
+            | Success x   -> Success <| cont x
+            | Failure exn -> Failure exn
 
     type internal StoppedReason =
         | UserTriggered          = 1    // shard processor was stopped by a user

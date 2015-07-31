@@ -302,7 +302,7 @@ type KinesisUtilsTests () =
         match res with | Success _ -> true
         |> should equal true
 
-        let (Success(nxtIterator, records)) = res
+        let (Success(_, nxtIterator, records)) = res
         nxtIterator |> should equal "nxt_iterator"
         records     |> should haveLength 1
         records.[0] |> should equal { SequenceNumber = "seq_num"; Data = [||]; PartitionKey = "partition_key" }
@@ -332,7 +332,7 @@ type KinesisUtilsTests () =
         match res with | Success _ -> true
         |> should equal true
 
-        let (Success(nxtIterator, records)) = res
+        let (Success(_, nxtIterator, records)) = res
         nxtIterator |> should equal "nxt_iterator"
         records     |> should haveLength 1
         records.[0] |> should equal { SequenceNumber = "seq_num"; Data = [||]; PartitionKey = "partition_key" }

@@ -373,7 +373,7 @@ Target "All" DoNothing
 "CleanDocs"
   ==> "GenerateHelpDebug"
 
-"GenerateHelp"
+"GenerateHelpDebug"
   ==> "KeepRunning"
     
 "ReleaseDocs"

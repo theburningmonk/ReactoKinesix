@@ -324,33 +324,56 @@ module internal KinesisUtils =
                     let! token = getShardIterator kinesis streamName shardId iteratorType
                     req.ShardIterator <- token
 
-                let! getRecordResult = Async.WithRetry(kinesis.GetRecordsAsync(req) |> Async.AwaitTask, config.MaxKinesisRetries)
+                let! getRecordResult = 
+                    Async.WithRetry(
+                        kinesis.GetRecordsAsync(req) |> Async.AwaitTask, 
+                        config.MaxKinesisRetries)
                 match getRecordResult with
                 | Success res -> 
                     logDebug "Received [{0}] records from stream [{1}], shard [{2}]"
                              [| res.Records.Count; streamName; shardId |]
-                    return Success(res.NextShardIterator, res.Records |> Seq.map (fun r -> !> r : Record) |> Seq.toArray)
+                    let records = res.Records 
+                                  |> Seq.map (fun r -> !> r : Record) 
+                                  |> Seq.toArray
+                    let behind = TimeSpan.FromMilliseconds <| float res.MillisBehindLatest
+
+                    return Success(behind, res.NextShardIterator, records)
                 | Failure exn ->
                     logError exn "Failed to get records from stream [{0}], shard [{1}]" [| streamName; shardId |]
                     return Failure(exn) 
         }
 
 module internal DynamoDBUtils =
-    let private shardIdAttr, lastHeartbeatAttr, workerIdAttr, checkpointAttr, isClosedAttr, handoverReqAttr = 
-        "ShardId", "LastHeartbeat", "WorkerId", "SequenceNumberCheckpoint", "IsClosed", "HandoverRequest"
+    let private shardIdAttr       = "ShardId"
+    let private lastHeartbeatAttr = "LastHeartbeat"
+    let private workerIdAttr      = "WorkerId"
+    let private checkpointAttr    = "SequenceNumberCheckpoint"
+    let private checkpointAtAttr  = "CheckpointAt"
+    let private timeBehindAttr    = "MillisecondsBehindLatest"
+    let private isClosedAttr      = "IsClosed"
+    let private handoverReqAttr   = "HandoverRequest"
 
     let private logger   = LogManager.GetLogger("KinesisUtils")
     let private logDebug = logDebug logger
     let private logWarn  = logWarn  logger
     let private logError = logError logger
 
-    let private dateTimeFormat = "yyyy-MM-dd HH:mm:ss.fffffff"
-    let private getHeartbeatTimestamp ()   = DateTime.UtcNow.ToString(dateTimeFormat)
-    let private fromHeartbeatTimestamp str = DateTime.ParseExact(str, dateTimeFormat, CultureInfo.InvariantCulture)
+    let private dateTimeFormat      = "yyyy-MM-dd HH:mm:ss.fffffff"
+    let private currentTimestamp () = DateTime.UtcNow.ToString(dateTimeFormat)
+    let private fromTimestamp str   = 
+        DateTime.ParseExact(
+            str, 
+            dateTimeFormat, 
+            CultureInfo.InvariantCulture)
 
     let private tryGetAttributeValue (dict : IDictionary<_, AttributeValue>) key = 
         match dict.TryGetValue key with | true, x -> Some x.S | _ -> None
-    let private parseBool (str : string) = match bool.TryParse(str) with | true, x -> x | _ -> false
+
+    let private parseBool (str : string) = 
+        match bool.TryParse(str) with 
+        | true, x -> x 
+        | _ -> false
+
     let private serializeHandoverReq   = serialize<HandoverRequest>
     let private deserializeHandoverReq = deserialize<HandoverRequest>
     
@@ -371,7 +394,10 @@ module internal DynamoDBUtils =
 
             match isClosed with
             | Some boolStr when parseBool boolStr -> ClosedShard
-            | _ -> Shard(WorkerId workerId, fromHeartbeatTimestamp heartbeat, checkpoint, handoverReq)
+            | _ -> Shard(WorkerId workerId, 
+                         fromTimestamp heartbeat, 
+                         checkpoint, 
+                         handoverReq)
 
     /// Returns the list of tables that currently exist in DynamoDB
     let private doesTableExist (dynamoDB : IAmazonDynamoDB) (TableName tableName) =
@@ -389,32 +415,62 @@ module internal DynamoDBUtils =
             logDebug "Table [{0}] not found" [| tableName |]
             false
 
+    [<AutoOpen>]
+    module private SyntacticSugar = 
+        let inline attribute x = new AttributeValue(S = x)
+        let inline attribtues xs = 
+            let xs = xs |> Array.map attribute
+            new List<AttributeValue>(xs)
+        let expected x  = new ExpectedAttributeValue(
+                                Exists = true,
+                                Value = attribute x)
+        let notExpected = new ExpectedAttributeValue(Exists = false)
+        let inline updatePut x = new AttributeValueUpdate(
+                                        Action = AttributeAction.PUT, 
+                                        Value  = attribute x)
+        let updateDel = new AttributeValueUpdate(Action = AttributeAction.DELETE)
+
     /// Creates a table in DynamoDB with the specified config and name
-    let createTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) (TableName tableName) =
+    let createTable (dynamoDB : IAmazonDynamoDB) 
+                    (config : ReactoKinesixConfig) 
+                    (TableName tableName) =
         try
             let req = new CreateTableRequest(TableName = tableName)
-            req.AttributeDefinitions.Add(new AttributeDefinition(AttributeName = shardIdAttr, AttributeType = ScalarAttributeType.S))
-            req.KeySchema.Add(new KeySchemaElement(AttributeName = shardIdAttr, KeyType = KeyType.HASH))
-            let throughput = new ProvisionedThroughput(ReadCapacityUnits  = config.DynamoDBReadThroughput,
-                                                       WriteCapacityUnits = config.DynamoDBWriteThroughput)
+            req.AttributeDefinitions.Add(
+                new AttributeDefinition(
+                    AttributeName = shardIdAttr, 
+                    AttributeType = ScalarAttributeType.S))
+            req.KeySchema.Add(
+                new KeySchemaElement(
+                    AttributeName = shardIdAttr, 
+                    KeyType = KeyType.HASH))
+            let throughput = 
+                new ProvisionedThroughput(
+                    ReadCapacityUnits  = config.DynamoDBReadThroughput,
+                    WriteCapacityUnits = config.DynamoDBWriteThroughput)
             req.ProvisionedThroughput <- throughput
         
             let res = dynamoDB.CreateTable(req)
             logDebug "Created state table [{0}], current status [{1}], read throughput [{2}], write throughput [{3}]"
-                      [| tableName; res.TableDescription.TableStatus; 
-                         res.TableDescription.ProvisionedThroughput.ReadCapacityUnits;
+                      [| tableName
+                         res.TableDescription.TableStatus
+                         res.TableDescription.ProvisionedThroughput.ReadCapacityUnits
                          res.TableDescription.ProvisionedThroughput.WriteCapacityUnits |]
 
             Success ()
         with
         | :? Amazon.DynamoDBv2.Model.ResourceInUseException as exn -> 
-            // already exists (perhaps race condition with multiple workers trying to create table at the same time)
-            logWarn exn "(Possible race condition) State table [{0}] already exists" [| tableName |]
+            // already exists (perhaps race condition with multiple workers trying
+            // to create table at the same time)
+            logWarn exn 
+                    "(Possible race condition) State table [{0}] already exists" 
+                    [| tableName |]
             Success ()
         | exn -> Failure exn
 
     /// Initializes the application state table if necessary and returns the table name
-    let initStateTable (dynamoDB : IAmazonDynamoDB) (config : ReactoKinesixConfig) tableName =
+    let initStateTable (dynamoDB : IAmazonDynamoDB) 
+                       (config : ReactoKinesixConfig) tableName =
         try
             match doesTableExist dynamoDB tableName with
             | true -> Success ()
@@ -423,36 +479,44 @@ module internal DynamoDBUtils =
         | exn -> Failure exn
 
     /// Waits till the DynamoDB table is ready
-    let rec awaitStateTableReady (dynamoDB : IAmazonDynamoDB) (TableName tableName as tn) =
+    let rec awaitStateTableReady (dynamoDB : IAmazonDynamoDB) 
+                                 (TableName tableName as tn) =
         async {
             let req = new DescribeTableRequest(TableName = tableName)
             let! res = dynamoDB.DescribeTableAsync(req) |> Async.AwaitTask
 
-            logDebug "State table [{0}] current status [{1}]" [| tableName; res.Table.TableStatus |]
+            logDebug "State table [{0}] current status [{1}]" 
+                     [| tableName; res.Table.TableStatus |]
             
             if res.Table.TableStatus = TableStatus.CREATING then
                 do! Async.Sleep(1000)
                 return! awaitStateTableReady dynamoDB tn
-            else logDebug "State table [{0}] is considered ready (not in CREATING status)" [| tableName |]
+            else logDebug "State table [{0}] is considered ready (not in CREATING status)" 
+                          [| tableName |]
         }
 
-    /// Puts a shard into the shard conditionally against the worker ID so that if another worker has
-    /// already added the shard then we don't proceed
-    let createShard (dynamoDB : IAmazonDynamoDB) (TableName tableName) (WorkerId workerId) (ShardId shardId) =
+    /// Puts a shard into the shard conditionally against the worker ID so 
+    /// that if another worker has already added the shard then we don't proceed
+    let createShard (dynamoDB : IAmazonDynamoDB) 
+                    (TableName tableName) 
+                    (WorkerId workerId) 
+                    (ShardId shardId) =
         async {
-            logDebug "Creating shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
+            logDebug "Creating shard [{2}] data in state table [{0}] for worker [{1}]" 
+                     [| tableName; workerId; shardId |]
 
             let req = new PutItemRequest(TableName = tableName)
-            req.Item.Add(shardIdAttr,       new AttributeValue(S = shardId))
-            req.Item.Add(workerIdAttr,      new AttributeValue(S = workerId))
-            req.Item.Add(lastHeartbeatAttr, new AttributeValue(S = getHeartbeatTimestamp()))
+            req.Item.Add(shardIdAttr,       attribute shardId)
+            req.Item.Add(workerIdAttr,      attribute workerId)
+            req.Item.Add(lastHeartbeatAttr, attribute <| currentTimestamp())
         
-            req.Expected.Add(workerIdAttr,  new ExpectedAttributeValue(Exists = false))
+            req.Expected.Add(workerIdAttr, notExpected)
 
             try
                 let! _ = dynamoDB.PutItemAsync(req) |> Async.AwaitTask
 
-                logDebug "Created shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
+                logDebug "Created shard [{2}] data in state table [{0}] for worker [{1}]" 
+                         [| tableName; workerId; shardId |]
                 return Success ()
             with
             | Flatten exn ->
@@ -462,7 +526,9 @@ module internal DynamoDBUtils =
                              [| tableName; workerId; shardId |]
                     return Success ()
                 | exn ->
-                    logError exn "Failed to create shard [{2}] data in state table [{0}] for worker [{1}]" [| tableName; workerId; shardId |]
+                    logError exn 
+                             "Failed to create shard [{2}] data in state table [{0}] for worker [{1}]" 
+                             [| tableName; workerId; shardId |]
                     return Failure exn
         }
 
@@ -483,11 +549,15 @@ module internal DynamoDBUtils =
                                      | Some { Expiry = expiry } -> now >= expiry
 
             match isHeartbeatExpired, isHandoverExpired with
-            | true,  true  -> ShardStatus.NotProcessing(shardId, workerId, heartbeat, seqNum)            
-            | true,  false -> let (Some { FromWorker = fromWorker; ToWorker = toWorker }) = handoverReq
-                              ShardStatus.HandingOver(shardId, WorkerId fromWorker, WorkerId toWorker, seqNum)
-            | false, true  -> ShardStatus.Processing(shardId, workerId, seqNum, None)
-            | false, false -> ShardStatus.Processing(shardId, workerId, seqNum, handoverReq)
+            | true,  true  -> 
+                ShardStatus.NotProcessing(shardId, workerId, heartbeat, seqNum)            
+            | true,  false -> 
+                let (Some { FromWorker = fromWorker; ToWorker = toWorker }) = handoverReq
+                ShardStatus.HandingOver(shardId, WorkerId fromWorker, WorkerId toWorker, seqNum)
+            | false, true  -> 
+                ShardStatus.Processing(shardId, workerId, seqNum, None)
+            | false, false -> 
+                ShardStatus.Processing(shardId, workerId, seqNum, handoverReq)
             
     /// Returns the current status of the shard
     let getShardStatus (dynamoDB : IAmazonDynamoDB) 
@@ -496,16 +566,28 @@ module internal DynamoDBUtils =
                        ((ShardId   shardIdStr) as shardId) =
         async {
             let req = new GetItemRequest(TableName = tableName, ConsistentRead = true)
-            req.Key.Add(shardIdAttr, new AttributeValue(S = shardIdStr))
-            req.AttributesToGet.AddRange([| shardIdAttr; workerIdAttr; checkpointAttr; lastHeartbeatAttr; isClosedAttr; handoverReqAttr |])
+            req.Key.Add(shardIdAttr, attribute shardIdStr)
+            req.AttributesToGet.AddRange(
+                [| shardIdAttr 
+                   workerIdAttr
+                   checkpointAttr
+                   lastHeartbeatAttr
+                   isClosedAttr
+                   handoverReqAttr |])
 
-            logDebug "Getting current status of shard [{0}] from state table [{1}]" [| shardId; tableName |]
+            logDebug "Getting current status of shard [{0}] from state table [{1}]" 
+                     [| shardId; tableName |]
 
-            let! res = Async.WithRetry(dynamoDB.GetItemAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
+            let! res = Async.WithRetry(
+                        dynamoDB.GetItemAsync(req) |> Async.AwaitTask, 
+                        config.MaxDynamoDBRetries)
 
-            match res with
-            | Failure exn -> return Failure exn
-            | Success res -> return Success <| getShardStatusInternal shardId config.HeartbeatTimeout res.Item
+            return res 
+                   |> Result.Bind (fun res -> 
+                        getShardStatusInternal 
+                            shardId 
+                            config.HeartbeatTimeout 
+                            res.Item)
         }
 
     /// Returns the current status fo all active (not-closed) shards
@@ -519,15 +601,27 @@ module internal DynamoDBUtils =
                 | Some startKey -> req.ExclusiveStartKey <- startKey
                 | _ -> ()
 
-                req.AttributesToGet.AddRange([| shardIdAttr; workerIdAttr; checkpointAttr; lastHeartbeatAttr; isClosedAttr; handoverReqAttr |])
-                let condition = new Condition(ComparisonOperator = ComparisonOperator.NE,
-                                              AttributeValueList = new List<AttributeValue>([| new AttributeValue(S = "True") |]))
+                req.AttributesToGet.AddRange(
+                    [| shardIdAttr
+                       workerIdAttr
+                       checkpointAttr
+                       lastHeartbeatAttr
+                       isClosedAttr
+                       handoverReqAttr |])
+                let condition = 
+                    new Condition(
+                        ComparisonOperator = ComparisonOperator.NE,
+                        AttributeValueList = attribtues [| "True" |])
                 req.ScanFilter.Add(isClosedAttr, condition)
 
-                let! res = Async.WithRetry(dynamoDB.ScanAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
+                let! res = Async.WithRetry(
+                            dynamoDB.ScanAsync(req) |> Async.AwaitTask, 
+                            config.MaxDynamoDBRetries)
 
                 match res with
-                // when LastEvaluatedKey is null/empty it means the last page of results have been process and there's no more data to be retrieved
+                // when LastEvaluatedKey is null/empty it means the last page 
+                // of results have been process and there's no more data to 
+                // be retrieved
                 | Success res when res.LastEvaluatedKey = null || res.LastEvaluatedKey.Count = 0 ->
                     let shardsAsItems = (res.Items :: acc) |> Seq.collect id                     
                     let shardStatuses = 
@@ -545,8 +639,9 @@ module internal DynamoDBUtils =
 
         async { return! scanTable [] None }
 
-    /// Updates a shard conditionally against the worker ID so that if for some reason another worker has
-    /// taken over processing of this shard then we shall stop further processing
+    /// Updates a shard conditionally against the worker ID so that if for some
+    /// reason another worker has taken over processing of this shard then we 
+    /// shall stop further processing
     let private updateShard (update   : UpdateItemRequest -> unit) 
                             (dynamoDB : IAmazonDynamoDB) 
                             (TableName  tableName) 
@@ -554,53 +649,64 @@ module internal DynamoDBUtils =
                             (ShardId    shardId) =
         async {
             let req = new UpdateItemRequest(TableName = tableName)
-            req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
-        
-            let expectedAttrVal = new ExpectedAttributeValue(Value = new AttributeValue(S = workerId), Exists = true)
-            req.Expected.Add(workerIdAttr, expectedAttrVal)
+            req.Key.Add(shardIdAttr, attribute shardId)
+            req.Expected.Add(workerIdAttr, expected workerId)
 
             // whilst updating the table, always update the heartbeat whilst we're at it
-            let newHeartbeatValue = new AttributeValue(S = getHeartbeatTimestamp())
-            req.AttributeUpdates.Add(lastHeartbeatAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newHeartbeatValue))
+            req.AttributeUpdates.Add(
+                lastHeartbeatAttr, 
+                updatePut <| currentTimestamp())
         
             update req
 
-            // exception handling for this is done in the client code based on the operation (heartbeat or checkpoint)
+            // exception handling for this is done in the client code based on 
+            // the operation (heartbeat or checkpoint)
             let! _ = dynamoDB.UpdateItemAsync(req) |> Async.AwaitTask
 
-            logDebug "Updated shard [{0}] for worker [{1}] in state table [{0}]" [| tableName; workerId; shardId |]
+            logDebug "Updated shard [{0}] for worker [{1}] in state table [{0}]" 
+                     [| tableName; workerId; shardId |]
         }
 
-    /// Updates the heartbeat value for the specified shard conditionally against the worker ID so that
-    /// if for some reason another worker has taken over this shard then we shall stop processing this shard
+    /// Updates the heartbeat value for the specified shard conditionally against
+    /// the worker ID so that if for some reason another worker has taken over 
+    /// this shard then we shall stop processing this shard
     let updateHeartbeat : IAmazonDynamoDB -> TableName -> WorkerId -> ShardId -> Async<unit> = 
-        updateShard (fun _ -> ())
+        updateShard ignore
 
-    /// Updates the sequence number checkpoint for the specified shard conditionally against the worker
-    /// ID so that if for some reason another worker has taken over this shard then we shall stop
-    /// processing this shard
-    let updateCheckpoint (SequenceNumber seqNumber) = 
+    /// Updates the sequence number checkpoint for the specified shard 
+    /// conditionally against the worker ID so that if for some reason another
+    /// worker has taken over this shard then we shall stop processing this shard
+    let updateCheckpoint (timeBehind : TimeSpan) (SequenceNumber seqNumber) = 
         let update (req : UpdateItemRequest) = 
-            let newCheckpointValue = new AttributeValue(S = seqNumber)
-            req.AttributeUpdates.Add(checkpointAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newCheckpointValue))
+            req.AttributeUpdates.Add(
+                checkpointAttr, 
+                updatePut seqNumber)
+            req.AttributeUpdates.Add(
+                checkpointAtAttr, 
+                updatePut <| currentTimestamp())
+            req.AttributeUpdates.Add(
+                timeBehindAttr,
+                updatePut <| timeBehind.TotalMilliseconds.ToString())
                     
         updateShard update
 
-    /// Updates the IsClosed flag for the specified shard conditionaly against the worker ID so that if 
-    /// for some reason another worker has taken over this shard then we shall stop processing this shard
+    /// Updates the IsClosed flag for the specified shard conditionaly against 
+    /// the worker ID so that if for some reason another worker has taken over 
+    /// this shard then we shall stop processing this shard
     let updateIsClosed (isClosed : bool) =
-        let update (req : UpdateItemRequest) = 
-            let newIsClosedValue = new AttributeValue(S = isClosed.ToString())
-            req.AttributeUpdates.Add(isClosedAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newIsClosedValue))
+        let update (req : UpdateItemRequest) =
+            req.AttributeUpdates.Add(
+                isClosedAttr, 
+                updatePut <| isClosed.ToString())
                         
         updateShard update
 
-    /// Updates the worker ID field for the specified shard conditionaly against the old worker ID
+    /// Updates the worker ID field for the specified shard conditionaly against 
+    /// the old worker ID
     let updateWorkerId (WorkerId newWorkerId) =
         let update (req : UpdateItemRequest) =
-            let newWorkerIdValue = new AttributeValue(S = newWorkerId)
-            req.AttributeUpdates.Add(workerIdAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = newWorkerIdValue))
-            req.AttributeUpdates.Add(handoverReqAttr, new AttributeValueUpdate(Action = AttributeAction.DELETE))
+            req.AttributeUpdates.Add(workerIdAttr, updatePut newWorkerId)
+            req.AttributeUpdates.Add(handoverReqAttr, updateDel)
 
         updateShard update
 
@@ -613,10 +719,8 @@ module internal DynamoDBUtils =
                              (ShardId    shardId) =
         async {
             let req = new UpdateItemRequest(TableName = tableName)
-            req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
-
-            let expectedAttrVal = new ExpectedAttributeValue(Exists = false)
-            req.Expected.Add(handoverReqAttr, expectedAttrVal)
+            req.Key.Add(shardIdAttr, attribute shardId)
+            req.Expected.Add(handoverReqAttr, notExpected)
 
             let expiry = DateTime.UtcNow.Add(config.HandoverRequestExpiry)
             let handoverReq =
@@ -625,8 +729,9 @@ module internal DynamoDBUtils =
                     ToWorker   = toWorkerId
                     Expiry     = expiry
                 }
-            let handoverReqVal = new AttributeValue(S = serializeHandoverReq handoverReq)
-            req.AttributeUpdates.Add(handoverReqAttr, new AttributeValueUpdate(Action = AttributeAction.PUT, Value = handoverReqVal))
+            req.AttributeUpdates.Add(
+                handoverReqAttr, 
+                updatePut <| serialize handoverReq)
             
             // exception handling for this is done in the client code based on the operation (heartbeat or checkpoint)
             let! _ = dynamoDB.UpdateItemAsync(req) |> Async.AwaitTask
@@ -643,12 +748,15 @@ module internal DynamoDBUtils =
                            (ShardId   shardId) =
         async {
             let req = new GetItemRequest(TableName = tableName, ConsistentRead = true)
-            req.Key.Add(shardIdAttr, new AttributeValue(S = shardId))
+            req.Key.Add(shardIdAttr, attribute shardId)
             req.AttributesToGet.Add(handoverReqAttr)
 
-            logDebug "Getting pending handover request for shard [{0}] in state table [{1}]" [| shardId; tableName |]
+            logDebug "Getting pending handover request for shard [{0}] in state table [{1}]" 
+                     [| shardId; tableName |]
 
-            let! res = Async.WithRetry(dynamoDB.GetItemAsync(req) |> Async.AwaitTask, config.MaxDynamoDBRetries)
+            let! res = Async.WithRetry(
+                        dynamoDB.GetItemAsync(req) |> Async.AwaitTask, 
+                        config.MaxDynamoDBRetries)
 
             match res with
             | Failure exn -> return Failure exn

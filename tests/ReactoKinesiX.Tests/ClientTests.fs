@@ -19,8 +19,8 @@ open ReactoKinesix
 open ReactoKinesix.Model
 open ReactoKinesix.Utils
 
-[<TestFixture>]
-type ``Given that an application is starting`` () = 
+[<AutoOpen>]
+module Tools = 
     do BasicConfigurator.Configure() |> ignore
 
     let doNothing = (fun _ -> ())
@@ -37,8 +37,9 @@ type ``Given that an application is starting`` () =
                     member this.OnMaxRetryExceeded (_, _) = ()
                     member this.Dispose () = () } }
 
+module ``Given that an application is starting`` = 
     [<Test>]
-    member test.``when it fails to initialize the state table it should except with InitializationFailedException`` () =
+    let ``when it fails to initialize the state table it should except with InitializationFailedException`` () =
         let factory = genFactory doNothing doNothing
 
         let kinesis    = Mock<IAmazonKinesis>().Create()        
@@ -52,7 +53,7 @@ type ``Given that an application is starting`` () =
         |> should throw typeof<InitializationFailedException>
 
     [<Test>]
-    member test.``when it finishes initializing it should create one processor for each shard`` () =
+    let ``when it finishes initializing it should create one processor for each shard`` () =
         let processors = ref 0
         let factory = genFactory (fun _ -> processors := !processors + 1) doNothing
 
@@ -71,12 +72,11 @@ type ``Given that an application is starting`` () =
         // give it some time for the app to detect dynamodb table statuschange and then initialize the processors
         Thread.Sleep(3000)
 
-        !processors |> should equal 1
-
-        app.Dispose()
+        try !processors |> should equal 1
+        finally app.Dispose()
 
     [<Test>]
-    member test.``when it finishes initializing the processor should start processing available records`` () =
+    let ``when it finishes initializing the processor should start processing available records`` () =
         let processed = ref 0
         let factory = genFactory doNothing (fun records -> processed := !processed + records.Length)
 
@@ -100,12 +100,11 @@ type ``Given that an application is starting`` () =
 
         Thread.Sleep(3000)
 
-        !processed |> should equal 100
-
-        app.Dispose()
+        try !processed |> should equal 100
+        finally app.Dispose()
 
     [<Test>]
-    member test.``when there is a shard being processed by another worker the application should not processing it`` () =
+    let ``when there is a shard being processed by another worker the application should not processing it`` () =
         let processed = ref 0
         let factory = genFactory doNothing (fun records -> processed := !processed + records.Length)
 
@@ -123,7 +122,7 @@ type ``Given that an application is starting`` () =
         |> Async.RunSynchronously
         |> ignore
         dynamoDb.Tables.[tableName].Status <- TableStatus.ACTIVE
-        
+
         for i = 0 to 99 do
             let memStream = new MemoryStream([| byte i |])
             let req = new PutRecordRequest(StreamName = "stream", Data = memStream)
@@ -132,7 +131,55 @@ type ``Given that an application is starting`` () =
         let app = ReactoKinesixApp.CreateNew(kinesis, dynamoDb, cloudWatch, "app-4", "stream", "worker", factory)
 
         Thread.Sleep(3000)
-        
-        !processed |> should equal 0
 
-        app.Dispose()
+        try !processed |> should equal 0
+        finally app.Dispose()
+
+module ``Given an error occurred`` =
+    open System
+
+    let recordEntry _ = 
+        let entry = new PutRecordsRequestEntry()
+        entry.Data <- new MemoryStream([| 42uy |])
+        entry
+
+    [<Test>]
+    let ``when iterator is expired, should get new iterator and continue processing`` () =
+        let processed = ref 0
+        let factory =   
+            genFactory 
+                doNothing 
+                (fun records ->
+                    // make the first batch slow, and therefore 2nd batch need to 
+                    // retry with seq number
+                    if !processed = 0 then 
+                        Thread.Sleep 150
+                    
+                    processed := !processed + records.Length)
+
+        let cloudWatch  = Mock<IAmazonCloudWatch>().Create()
+        let kinesisStub = new KinesisStub(iteratorExpiry = TimeSpan.FromMilliseconds 100.0)
+        let kinesis     = kinesisStub :> IAmazonKinesis
+        kinesis.CreateStream(new CreateStreamRequest(StreamName = "stream", ShardCount = 1)) 
+        |> ignore
+        kinesisStub.Streams.["stream"].Status <- StreamStatus.ACTIVE
+
+        let req = new PutRecordsRequest(StreamName = "stream")
+        { 1..100 } |> Seq.map recordEntry |> req.Records.AddRange
+        kinesis.PutRecords(req) |> ignore
+
+        let dynamoDb = new DynamoDBStub()
+
+        let config = ReactoKinesixConfig()
+        config.MaxBatchSize <- 10
+        let app = ReactoKinesixApp.CreateNew(
+                    kinesis, dynamoDb, cloudWatch, "app-err", "stream", "worker", factory, config)
+
+        let table = dynamoDb.Tables.Values |> Seq.head
+        table.Status <- TableStatus.ACTIVE
+
+        // give it some time for the app to detect dynamodb table statuschange and then initialize the processors
+        Thread.Sleep(3000)
+        
+        try !processed |> should equal 100
+        finally app.Dispose()
