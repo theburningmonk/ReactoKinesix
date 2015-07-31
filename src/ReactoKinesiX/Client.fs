@@ -263,7 +263,8 @@ and ReactoKinesixApp private (kinesis           : IAmazonKinesis,
             | Choice2Of2 exn -> logError exn "Failed to issued handover request to worker [{0}] for shard [{1}]" [| fromWorkerId; shardId |]
         }
 
-    // look for workers whom have taken on too many shards and request to share their load to balance the load amongst the workers
+    // look for workers whom have taken on too many shards and request to
+    // share their load to balance the load amongst the workers
     let shareLoad =
         async {
             let! shardStatuses = DynamoDBUtils.getShardStatuses dynamoDB config tableName

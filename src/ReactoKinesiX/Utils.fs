@@ -324,12 +324,19 @@ module internal KinesisUtils =
                     let! token = getShardIterator kinesis streamName shardId iteratorType
                     req.ShardIterator <- token
 
-                let! getRecordResult = Async.WithRetry(kinesis.GetRecordsAsync(req) |> Async.AwaitTask, config.MaxKinesisRetries)
+                let! getRecordResult = 
+                    Async.WithRetry(
+                        kinesis.GetRecordsAsync(req) |> Async.AwaitTask, 
+                        config.MaxKinesisRetries)
                 match getRecordResult with
                 | Success res -> 
                     logDebug "Received [{0}] records from stream [{1}], shard [{2}]"
                              [| res.Records.Count; streamName; shardId |]
-                    return Success(res.NextShardIterator, res.Records |> Seq.map (fun r -> !> r : Record) |> Seq.toArray)
+                    let records = res.Records 
+                                  |> Seq.map (fun r -> !> r : Record) 
+                                  |> Seq.toArray
+
+                    return Success(res.NextShardIterator, records)
                 | Failure exn ->
                     logError exn "Failed to get records from stream [{0}], shard [{1}]" [| streamName; shardId |]
                     return Failure(exn) 
