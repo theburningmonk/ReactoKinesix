@@ -1,3 +1,7 @@
+#### 0.5.0 - July 31, 2015
+- re-aqcuire shard iterator in the event that the current iterator has expired
+- record time behind tip of stream & timestamp of checkpoint in state table
+
 #### 0.4.0 - May 8, 2015
 - for background/scheduled tasks start them on the current thread over always queue it up to threadpool
 - only fetch after successful processing
