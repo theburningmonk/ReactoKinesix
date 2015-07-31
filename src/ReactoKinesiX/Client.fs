@@ -441,9 +441,9 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
 
     //#region Events
 
-    let batchReceivedEvent          = new Event<Iterator * Record[]>()  // when a new batch of records have been received
-    let batchErrorEvent             = new Event<Exception>()            // when an error is encountered when processing a record
-    let maxRetryExceededEvent       = new Event<Exception>()            // when the max number of retires have been exceeded
+    let batchReceivedEvent          = new Event<TimeSpan * Iterator * Record[]>() // when a new batch of records have been received
+    let batchErrorEvent             = new Event<Exception>()      // when an error is encountered when processing a record
+    let maxRetryExceededEvent       = new Event<Exception>()      // when the max number of retires have been exceeded
 
     let startProcessingEvent        = new Event<Iterator * Record[] * IRecordProcessor>() // when we start to process a batch of records
     let batchProcessedEvent         = new Event<Iterator * Record[] * IRecordProcessor>() // when a batch has finished processing with the iterator for next batch
@@ -518,10 +518,11 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
             }
         Async.Start(work, cts.Token)
 
-    let rec updateCheckpoint seqNum = 
+    let rec updateCheckpoint timeBehind seqNum = 
         let work = 
             async {
-                let! res = DynamoDBUtils.updateCheckpoint 
+                let! res = DynamoDBUtils.updateCheckpoint
+                                timeBehind
                                 seqNum 
                                 app.DynamoDB 
                                 app.TableName 
@@ -547,7 +548,7 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                         // behaviour under these circumstances?
                         logError exn "Failed to update checkpoint to [{0}]...retrying" [| seqNum |]
                         do! Async.Sleep(1000)
-                        updateCheckpoint seqNum
+                        updateCheckpoint timeBehind seqNum
             }
         Async.Start(work, cts.Token)
 
@@ -568,12 +569,16 @@ and internal ReactoKinesixShardProcessor (app : ReactoKinesixApp, shardId : Shar
                         app.Config.MaxBatchSize
 
                 match getRecordsResult with
-                | Success(nextIterator, batch) when nextIterator = null -> 
-                    logDebug "Received batch of [{0}] records, no more records will be available (end of shard)" [| batch.Length |]
-                    batchReceivedEvent.Trigger(EndOfShard, batch)
-                | Success(nextIterator, batch) -> 
-                    logDebug "Received batch of [{0}] records, next iterator [{1}]" [| batch.Length; iterator |]
-                    batchReceivedEvent.Trigger(IteratorToken nextIterator, batch)
+                | Success(behind, nextIterator, batch) when nextIterator = null -> 
+                    logDebug "Received batch of [{0}] records, no more records will be available (end of shard)" 
+                             [| batch.Length |]
+                    batchReceivedEvent.Trigger(behind, EndOfShard, batch)
+                | Success(behind, nextIterator, batch) -> 
+                    logDebug "Received batch of [{0}] records, next iterator [{1}], time behind [{2}]" 
+                             [| batch.Length
+                                iterator
+                                behind |]
+                    batchReceivedEvent.Trigger(behind, IteratorToken nextIterator, batch)
                 | Failure(exn) -> 
                     match exn with
                     | :? ShardCannotBeIteratedException  -> shardClosedEvent.Trigger()
@@ -592,14 +597,17 @@ only keep data for 24 hours.
                     | _ -> do! fetchNextRecords iterator seqNum
         }
 
-    let processBatch (iterator, records : Record[]) =
+    let processBatch (behind : TimeSpan, iterator, records : Record[]) =
         if processorFactory <> app.ProcessorFactory then
             logInfo "Processor factory has changed, disposing existing factory..." [||]
             processor.Dispose()
             processor <- newProcessor()
 
+        logDebug "Currently behind the tip of stream by [{0}]" [| behind |]
+
         let recordCount = records.Length
-        logDebug "Start processing batch of [{0}] records, next iterator [{1}]" [| recordCount; iterator |]
+        logDebug "Start processing batch of [{0}] records, next iterator [{1}]" 
+                 [| recordCount; iterator |]
 
         let inline tryProcess (records : Record[]) =
             try
@@ -620,7 +628,9 @@ only keep data for 24 hours.
                         batchProcessedEvent.Trigger(iterator, records, processor)
 
                         if checkpoint 
-                        then updateCheckpoint <| SequenceNumber ((Seq.last records).SequenceNumber)
+                        then (Seq.last records).SequenceNumber
+                             |> SequenceNumber
+                             |> updateCheckpoint behind
                         else noCheckpointEvent.Trigger()
                     | { Status = Status.Failure exn } ->
                         batchErrorEvent.Trigger(exn)
@@ -730,7 +740,7 @@ only keep data for 24 hours.
 
     let batchReceived    = batchReceivedEvent.Publish
     let batchReceivedSub = 
-        batchReceived.Subscribe(fun (_, records : Record[]) -> 
+        batchReceived.Subscribe(fun (_, _, records : Record[]) -> 
             metricsAgent.TrackFetched(shardId, records.Length))
 
     // fetch new records after the previous batch has been processed until 
@@ -742,10 +752,10 @@ only keep data for 24 hours.
 
     let emptyReceived = 
         batchReceived 
-        |> Observable.filter (fun (_, records) -> records.Length = 0)
+        |> Observable.filter (fun (_, _, records) -> records.Length = 0)
     let nonEmptyReceived = 
         batchReceived 
-        |> Observable.filter (fun (_, records) -> records.Length > 0)
+        |> Observable.filter (fun (_, _, records) -> records.Length > 0)
 
     // start fetching for the next batch of records straight after the last
     // batch was received, with a minor delay if the last batch was empty 
@@ -756,9 +766,9 @@ only keep data for 24 hours.
             .Merge nonEmptyReceived
     let fetchNextSub = 
         fetchNext
-            .Zip(processed, fun iterator _ -> iterator)
+            .Zip(processed, fun fetchRes _ -> fetchRes)
             .TakeUntil(stopFetching)
-            .Subscribe(fun (iterator, records) ->
+            .Subscribe(fun (_, iterator, records) ->
                 let seqNum = 
                     match records with
                     | [||] -> None

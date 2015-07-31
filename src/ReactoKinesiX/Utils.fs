@@ -335,8 +335,9 @@ module internal KinesisUtils =
                     let records = res.Records 
                                   |> Seq.map (fun r -> !> r : Record) 
                                   |> Seq.toArray
+                    let behind = TimeSpan.FromMilliseconds <| float res.MillisBehindLatest
 
-                    return Success(res.NextShardIterator, records)
+                    return Success(behind, res.NextShardIterator, records)
                 | Failure exn ->
                     logError exn "Failed to get records from stream [{0}], shard [{1}]" [| streamName; shardId |]
                     return Failure(exn) 
@@ -348,6 +349,7 @@ module internal DynamoDBUtils =
     let private workerIdAttr      = "WorkerId"
     let private checkpointAttr    = "SequenceNumberCheckpoint"
     let private checkpointAtAttr  = "CheckpointAt"
+    let private timeBehindAttr    = "MillisecondsBehindLatest"
     let private isClosedAttr      = "IsClosed"
     let private handoverReqAttr   = "HandoverRequest"
 
@@ -674,7 +676,7 @@ module internal DynamoDBUtils =
     /// Updates the sequence number checkpoint for the specified shard 
     /// conditionally against the worker ID so that if for some reason another
     /// worker has taken over this shard then we shall stop processing this shard
-    let updateCheckpoint (SequenceNumber seqNumber) = 
+    let updateCheckpoint (timeBehind : TimeSpan) (SequenceNumber seqNumber) = 
         let update (req : UpdateItemRequest) = 
             req.AttributeUpdates.Add(
                 checkpointAttr, 
@@ -682,6 +684,9 @@ module internal DynamoDBUtils =
             req.AttributeUpdates.Add(
                 checkpointAtAttr, 
                 updatePut <| currentTimestamp())
+            req.AttributeUpdates.Add(
+                timeBehindAttr,
+                updatePut <| timeBehind.TotalMilliseconds.ToString())
                     
         updateShard update
 
