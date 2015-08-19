@@ -4,8 +4,4 @@ AWSSDK
 Foq
 FsUnit
 log4net
-Rx-Core
-Rx-Interfaces
-Rx-Linq
-Rx-Main
-Rx-PlatformServices
+FSharp.Control.Reactive
