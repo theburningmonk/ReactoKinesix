@@ -1,3 +1,6 @@
+#### 0.6.0 - August 19, 2015
+- depend on the more current FSharp.Control.Reactive instead of FSharp.Reactive
+
 #### 0.5.0 - July 31, 2015
 - re-aqcuire shard iterator in the event that the current iterator has expired
 - record time behind tip of stream & timestamp of checkpoint in state table
