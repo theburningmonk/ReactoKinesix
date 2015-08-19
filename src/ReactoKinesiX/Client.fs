@@ -9,7 +9,7 @@ open System.Reactive.Linq
 open System.Reactive.Subjects
 open System.Threading
 open System.Threading.Tasks
-open FSharp.Reactive
+open FSharp.Control.Reactive
 
 open log4net
 
@@ -816,8 +816,7 @@ only keep data for 24 hours.
                      |> Observable.merge noCheckpointEvent.Publish
 
     let stopping = stopProcessing
-                   |> Observable.combineLatest stopPoints
-                   |> Observable.map fst
+                   |> Observable.combineLatest (fun _ reason -> reason) stopPoints
                    |> Observable.take 1
     let _ = stopping.Subscribe(fun reason -> stoppedEvent.Trigger reason)
        
