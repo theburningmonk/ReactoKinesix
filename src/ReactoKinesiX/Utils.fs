@@ -583,7 +583,7 @@ module internal DynamoDBUtils =
                         config.MaxDynamoDBRetries)
 
             return res 
-                   |> Result.Bind (fun res -> 
+                   |> InternalModel.Result.Bind (fun res -> 
                         getShardStatusInternal 
                             shardId 
                             config.HeartbeatTimeout 
